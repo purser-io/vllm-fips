@@ -152,6 +152,15 @@ pytest tests/
 pytest -s -v tests/test_logger.py
 ```
 
+!!! warning "Running tests on a FIPS-enabled host"
+    The commands above install the stock `opencv-python-headless` from PyPI,
+    whose bundled OpenSSL aborts the process on `import cv2` (exit code 134) on
+    FIPS-enabled hosts — so any test that touches multimodal video will crash
+    the interpreter rather than fail cleanly. The container images avoid this by
+    installing a rebuilt wheel; to reproduce that locally, build it with
+    `docker/Dockerfile.opencv-fips` and install it over the stock one. See
+    [FIPS Compatibility](../usage/security.md#opencv-and-bundled-openssl).
+
 !!! tip "Install python3-dev if Python.h is missing"
     If any of the above commands fails with `Python.h: No such file or directory`, install
     `python3-dev` with `sudo apt install python3-dev`.

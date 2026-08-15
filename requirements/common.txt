@@ -32,7 +32,7 @@ jsonschema >= 4.23.0 # required for MiniMax M3 tool schema validation
 pyzmq >= 25.0.0
 msgspec
 mistral_common[image] >= 1.11.6
-opencv-python-headless >= 4.13.0    # required for video IO
+opencv-python-headless >= 4.13.0    # required for video IO. NOTE: PyPI wheels bundle an OpenSSL that aborts `import cv2` on FIPS hosts; the CUDA images pin a FIPS-safe rebuild via UV_OVERRIDE in docker/Dockerfile. Do not pin the `+fips` local version here: common.txt is shared with cpu/rocm/tpu/xpu and feeds the published wheel's install_requires.
 pyyaml
 six>=1.16.0; python_version > '3.11' # transitive dependency of pandas that needs to be the latest version for python 3.12
 setuptools>=77.0.3,<81.0.0; python_version > '3.11' # Setuptools is used by triton, we need to ensure a modern version is installed for 3.12+ so that it does not try to import distutils, which was removed in 3.12

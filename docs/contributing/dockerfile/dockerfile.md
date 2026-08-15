@@ -3,6 +3,21 @@
 We provide a [docker/Dockerfile](../../../docker/Dockerfile) to construct the image for running an OpenAI compatible server with vLLM.
 More information about deploying with Docker can be found [here](../../deployment/docker.md).
 
+## Auxiliary Dockerfiles
+
+Alongside the target-specific Dockerfiles (`Dockerfile.cpu`, `Dockerfile.rocm`,
+`Dockerfile.xpu`, and friends), `docker/` contains one Dockerfile that does not
+build a vLLM image at all:
+
+- [docker/Dockerfile.opencv-fips](../../../docker/Dockerfile.opencv-fips) builds
+  a single artifact — a FIPS-safe `opencv-python-headless` wheel — and exports
+  it via a `FROM scratch` stage. The main `docker/Dockerfile` consumes that
+  wheel from `custom-wheels/` and fails fast if it is absent. It is versioned
+  independently of the vLLM image and is not part of the build graph below.
+  See [FIPS Compatibility](../../usage/security.md#opencv-and-bundled-openssl).
+
+The graph in this page is generated from `docker/Dockerfile` only.
+
 Below is a visual representation of the multi-stage Dockerfile. The build graph contains the following nodes:
 
 - All build stages

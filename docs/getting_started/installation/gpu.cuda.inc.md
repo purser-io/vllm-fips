@@ -347,6 +347,34 @@ DOCKER_BUILDKIT=1 docker build . \
     --file docker/Dockerfile
 ```
 
+!!! important "Prerequisite: FIPS-safe OpenCV wheel"
+    The build expects a locally built `opencv-python-headless` wheel in
+    `custom-wheels/`, and fails fast with the command below if it is missing:
+
+    ```bash
+    docker buildx build -f docker/Dockerfile.opencv-fips --platform linux/amd64 \
+        --target export --output type=local,dest=custom-wheels .
+    ```
+
+    The wheels published on PyPI bundle their own OpenSSL inside a vendored
+    FFmpeg; on a FIPS-enabled host that OpenSSL fails its self-test during
+    `dlopen` and aborts the process on `import cv2` (exit code 134). The
+    upstream fixes are still open, so this fork builds its own wheel. Pass
+    `--platform` explicitly — the wheel is architecture-specific and buildx
+    defaults to the host architecture. For the full rationale see the
+    "OpenCV and bundled OpenSSL" section of `docs/usage/security.md`, and
+    `custom-wheels/README.md` for build details. This wheel is maintained by
+    Purser, not by the upstream vLLM or OpenCV projects.
+
+    Prebuilt wheels for both architectures are published by the
+    `OpenCV FIPS wheel` workflow in the Purser fork:
+
+    ```bash
+    gh run download --repo purser-io/vllm-fips \
+        --name opencv-fips-wheels --dir custom-wheels
+    sha256sum -c custom-wheels/SHA256SUMS
+    ```
+
 !!! note
     By default vLLM will build for all GPU types for widest distribution. If you are just building for the
     current GPU type the machine is running on, you can add the argument `--build-arg torch_cuda_arch_list=""`

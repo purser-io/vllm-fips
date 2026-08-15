@@ -1,0 +1,260 @@
+# Reproducible build of a FIPS-safe `opencv-python-headless` wheel.
+#
+# Maintained by Purser in https://github.com/purser-io/vllm-fips -- NOT by the
+# upstream vLLM or OpenCV projects. Report problems with this wheel there;
+# vulnerabilities privately (GitHub Security advisory, or security@purser-io.io).
+# The diagnosis and both candidate upstream fixes referenced below are the work
+# of the OpenCV community, credited inline.
+#
+# WHY THIS EXISTS
+# ---------------
+# The published PyPI manylinux wheels bundle their own OpenSSL (1.1.1w),
+# linked into a vendored FFmpeg and shipped in `opencv_python_headless.libs/`.
+# On a FIPS-enabled host that bundled, non-validated OpenSSL runs its self-test
+# at dlopen() time and calls abort():
+#
+#     crypto/fips/fips.c:154: OpenSSL internal error: FATAL FIPS SELFTEST FAILURE
+#     Aborted (core dumped)                                    # exit code 134
+#
+# This is a hard process abort during `import cv2`, not a catchable Python
+# exception. See opencv/opencv-python#1184 and #1191.
+#
+# Upstream fixes (opencv/opencv-python#1190 and #1224) drop the vendored
+# OpenSSL and point FFmpeg at the *system* OpenSSL via pkg-config. Both PRs are
+# still open (#1224 is CONFLICTING), so no released wheel carries the fix.
+#
+# WHAT THIS BUILD DOES DIFFERENTLY
+# --------------------------------
+# We go one step further than upstream and build FFmpeg with `--disable-openssl`
+# rather than relinking it against a system OpenSSL. FFmpeg only needs OpenSSL
+# for TLS transports (https/rtmps/tls). vLLM never asks FFmpeg to open a URL --
+# `vllm/multimodal/video.py` hands OpenCV an in-memory buffer via
+# `cv2.VideoCapture(BytesIO(data), backend, [])` -- so removing FFmpeg's TLS
+# backend costs no vLLM functionality and removes the FIPS trigger entirely
+# instead of relocating it to the host.
+#
+# Crucially we KEEP FFmpeg itself. OpenCV without FFmpeg reports
+# `FFMPEG: NO` and exposes no *stream-buffered* videoio backend, which is
+# exactly the capability `vllm/multimodal/video.py` requires -- an OpenCV built
+# without it fixes FIPS by deleting the feature vLLM needs.
+#
+# The wheel is built on the same Ubuntu release as the vLLM runtime image and
+# then auditwheel-repaired, so it is self-contained (no dependency on host
+# libjpeg/libtiff sonames) and carries a manylinux tag.
+#
+# BUILD
+#   docker buildx build -f docker/Dockerfile.opencv-fips --platform linux/amd64 \
+#       --target export --output type=local,dest=custom-wheels .
+#
+# Always pass --platform explicitly. The wheel is architecture-specific and
+# buildx defaults to the host's architecture, so building on an arm64 machine
+# (e.g. Apple Silicon) silently produces an aarch64 wheel that cannot satisfy
+# the pin in an x86_64 image. Build on a native runner where possible --
+# emulated cross-builds of OpenCV + FFmpeg are extremely slow. For an arm64
+# vLLM image, build with --platform linux/arm64 and keep both wheels in
+# custom-wheels/; uv selects the one matching the target.
+#
+# The resulting wheel version is stamped with a `+fips` local version segment so
+# that the pin in requirements/common.txt can only ever be satisfied by this
+# build -- PyPI has no `+fips` release, so a resolver can never silently fall
+# back to the crashing upstream wheel.
+
+ARG UBUNTU_VERSION=22.04
+FROM ubuntu:${UBUNTU_VERSION} AS builder
+
+ARG PYTHON_VERSION=3.12
+# opencv-python tags are ONLY the trailing component, and they do not imply the
+# OpenCV minor version. Verified against PyPI:
+#     tag 90 -> 4.13.0.90    tag 92 -> 4.13.0.92    tag 94 -> 4.14.0.94
+# Tag 92 is deliberate: it is the newest 4.13.0.x, which keeps this change a
+# FIPS fix rather than also bumping OpenCV to 4.14. requirements/test/*.txt
+# already pin 4.13.0.90/4.13.0.92, so this stays on the line the repo tests.
+# If you bump this, update EXPECT_VERSION below and every pin listed there.
+ARG OPENCV_PYTHON_REF=92
+ARG FFMPEG_VERSION=7.1.1
+# Commit that tag n7.1.1 points at. Verified and asserted during the build so a
+# moved tag fails loudly instead of silently changing the sources.
+ARG FFMPEG_COMMIT=db69d06eeeab4f46da15030a80d539efb4503ca8
+ARG LOCAL_VERSION_SUFFIX=fips
+# Asserted after the build so a tag/version mismatch fails here rather than
+# surfacing later as an unsatisfiable pin in the vLLM image build. Must match
+# requirements/common.txt and the UV_OVERRIDE entries in docker/Dockerfile.
+ARG EXPECT_VERSION=4.13.0.92+fips
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Toolchain, image codecs, and the FFmpeg codec deps we intend to keep.
+# Deliberately absent: libssl-dev, libgnutls28-dev, libmbedtls-dev. If none of
+# them are present, FFmpeg's configure cannot silently re-enable a TLS backend.
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends \
+        software-properties-common ca-certificates curl git \
+        gnupg gpg-agent dirmngr \
+        build-essential cmake ninja-build pkg-config nasm yasm \
+        zlib1g-dev libjpeg-turbo8-dev libpng-dev libtiff-dev \
+        libwebp-dev libopenjp2-7-dev \
+        libdav1d-dev \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update -y \
+    && apt-get install -y --no-install-recommends \
+        python${PYTHON_VERSION} python${PYTHON_VERSION}-dev \
+        python${PYTHON_VERSION}-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python${PYTHON_VERSION} -m venv /opt/bldenv
+ENV PATH="/opt/bldenv/bin:$PATH"
+# patchelf comes from PyPI, not apt: Ubuntu 22.04 ships 0.14.3 and
+# `auditwheel repair` requires >= 0.14.5.
+RUN pip install --no-cache-dir --upgrade \
+        pip setuptools wheel scikit-build auditwheel numpy patchelf
+
+# ---------------------------------------------------------------------------
+# FFmpeg, built WITHOUT any TLS backend.
+#
+# `--disable-openssl` is the FIPS fix. The sibling `--disable-gnutls` /
+# `--disable-mbedtls` flags stop configure from autodetecting a replacement TLS
+# library and quietly reintroducing a crypto dependency.
+#
+# LICENSING: deliberately NO `--enable-gpl` / `--enable-libx264` /
+# `--enable-libx265`. Those are GPL *encoders*, and auditwheel would bundle
+# them into a wheel that ships next to Apache-2.0 code. vLLM only decodes, and
+# the two encoders its tests do exercise (`mp4v` and `XVID`, in
+# tests/multimodal/media/test_video.py) are both FFmpeg's native mpeg4 encoder.
+# libvpx is likewise an encoder -- FFmpeg's native VP8/VP9 decoders cover the
+# decode path. So this stays LGPL with no loss of function.
+#
+# libdav1d (BSD-2) is kept because FFmpeg's native AV1 decoder is markedly
+# slower.
+# ---------------------------------------------------------------------------
+WORKDIR /src
+# Sourced from the GitHub mirror by tag, then pinned to an exact commit, rather
+# than from https://ffmpeg.org/releases/. Two reasons:
+#   * Integrity: the commit pin is content-addressed, so the build cannot
+#     silently pick up different sources. A tarball URL has no such guarantee.
+#   * Availability: ffmpeg.org has served a self-signed certificate
+#     (CN=ffbox, root@ffmpeg.org) during this work. The correct response to
+#     that is a verifiable source, never `curl -k` -- disabling TLS
+#     verification in the build of a compliance artifact defeats the purpose.
+RUN git clone --depth 1 --branch "n${FFMPEG_VERSION}" \
+        https://github.com/FFmpeg/FFmpeg.git "ffmpeg-${FFMPEG_VERSION}" \
+    && cd "ffmpeg-${FFMPEG_VERSION}" \
+    && actual="$(git rev-parse HEAD)" \
+    && if [ "$actual" != "${FFMPEG_COMMIT}" ]; then \
+        echo "FATAL: n${FFMPEG_VERSION} resolved to $actual," >&2; \
+        echo "expected ${FFMPEG_COMMIT}. Tag moved or repo compromised." >&2; \
+        exit 1; \
+    fi \
+    && ./configure \
+        --prefix=/opt/ffmpeg \
+        --enable-shared --disable-static --enable-pic \
+        --disable-openssl --disable-gnutls --disable-mbedtls \
+        --disable-programs --disable-doc \
+        --enable-libdav1d \
+    && make -j"$(nproc)" && make install \
+    && cd / && rm -rf /src/ffmpeg-${FFMPEG_VERSION}
+
+# Fail the build immediately if FFmpeg picked up a crypto library anyway.
+RUN if find /opt/ffmpeg -name '*.so*' -exec sh -c \
+        'objdump -p "$1" 2>/dev/null | grep -qiE "NEEDED.*(libssl|libcrypto)"' _ {} \; -print \
+        | grep -q .; then \
+        echo "FATAL: FFmpeg linked against OpenSSL despite --disable-openssl" >&2; \
+        exit 1; \
+    fi
+
+ENV PKG_CONFIG_PATH=/opt/ffmpeg/lib/pkgconfig
+ENV LD_LIBRARY_PATH=/opt/ffmpeg/lib
+
+# ---------------------------------------------------------------------------
+# OpenCV (headless) against that FFmpeg.
+# ---------------------------------------------------------------------------
+WORKDIR /src
+# Only the `opencv` submodule is needed. A plain `--recursive` also drags in
+# opencv_contrib and opencv_extra (hundreds of MB of test fixtures) which
+# ENABLE_CONTRIB=0 never uses, and which noticeably slow or stall the clone.
+RUN git clone --depth 1 --branch "${OPENCV_PYTHON_REF}" \
+        https://github.com/opencv/opencv-python.git opencv-python \
+    && cd opencv-python \
+    && git submodule update --init --depth 1 opencv
+
+WORKDIR /src/opencv-python
+ENV ENABLE_HEADLESS=1
+ENV ENABLE_CONTRIB=0
+ENV CMAKE_ARGS="\
+-DWITH_FFMPEG=ON \
+-DOPENCV_FFMPEG_SKIP_BUILD_CHECK=OFF \
+-DWITH_GSTREAMER=OFF \
+-DWITH_QT=OFF -DWITH_GTK=OFF \
+-DWITH_1394=OFF -DWITH_OPENEXR=OFF \
+-DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF \
+-DBUILD_opencv_apps=OFF"
+RUN pip wheel . --no-deps --wheel-dir /wheels-raw -v
+
+# auditwheel bundles the image codecs and FFmpeg into the wheel, so the result
+# does not depend on the runtime image happening to ship matching sonames. This
+# is what the current hand-built wheel skipped -- it needed libjpeg.so.62 and
+# libtiff.so.6, neither of which exists on nvidia/cuda:*-ubuntu22.04.
+RUN auditwheel repair /wheels-raw/*.whl -w /wheels-repaired
+
+# ---------------------------------------------------------------------------
+# Verification gate + local-version stamp.
+# ---------------------------------------------------------------------------
+COPY tools/check_opencv_fips.py /tmp/check_opencv_fips.py
+
+# Assert the repaired wheel carries neither OpenSSL (the FIPS abort) nor a GPL
+# codec (a licensing problem in an Apache-2.0 distribution). auditwheel bundles
+# whatever FFmpeg linked against, so both are checked on the actual artifact
+# rather than trusted from the configure flags.
+RUN python - <<'PY'
+import glob, re, sys, zipfile
+
+whl = glob.glob('/wheels-repaired/*.whl')[0]
+names = zipfile.ZipFile(whl).namelist()
+
+checks = {
+    'OpenSSL (aborts import cv2 on FIPS hosts)': r'lib(ssl|crypto)[.\-]',
+    'GPL codec (incompatible with Apache-2.0)': r'lib(x264|x265)[.\-]',
+}
+failed = False
+for label, pattern in checks.items():
+    hits = [n for n in names if re.search(pattern, n)]
+    if hits:
+        print(f"FATAL: wheel bundles {label}: {hits}", file=sys.stderr)
+        failed = True
+if failed:
+    sys.exit(1)
+print(f"OK: no OpenSSL and no GPL codecs in {whl.rsplit('/', 1)[-1]}")
+PY
+
+# Stamp a `+fips` local version so the requirements pin is unsatisfiable by any
+# PyPI release. `wheel unpack`/`pack` regenerates RECORD and preserves the
+# platform tag recorded in the WHEEL metadata.
+RUN set -eu; \
+    whl="$(ls /wheels-repaired/*.whl)"; \
+    mkdir -p /repack /wheels; \
+    python -m wheel unpack "$whl" -d /repack; \
+    d="$(ls -d /repack/*/)"; d="${d%/}"; \
+    ver="$(sed -n 's/^Version: //p' "$d"/*.dist-info/METADATA | head -1)"; \
+    case "$ver" in *+*) \
+        echo "FATAL: $ver already has a local version segment; refusing to" >&2; \
+        echo "double-stamp (PEP 440 allows only one '+' component)." >&2; \
+        exit 1;; \
+    esac; \
+    new="${ver}+${LOCAL_VERSION_SUFFIX}"; \
+    sed -i "0,/^Version: ${ver}$/s//Version: ${new}/" "$d"/*.dist-info/METADATA; \
+    mv "$d"/opencv_python_headless-"${ver}".dist-info \
+       "$d"/opencv_python_headless-"${new}".dist-info; \
+    mv "$d" "/repack/opencv_python_headless-${new}"; \
+    python -m wheel pack "/repack/opencv_python_headless-${new}" -d /wheels; \
+    echo "stamped: $(ls /wheels)"
+
+# Install and run the real gate: no OpenSSL in the loaded process, FFmpeg
+# present, and a stream-buffered backend available (what vLLM actually calls).
+RUN pip install --no-cache-dir /wheels/*.whl \
+    && python /tmp/check_opencv_fips.py \
+        --require-ffmpeg --expect-version "${EXPECT_VERSION}"
+
+# ---------------------------------------------------------------------------
+# `--target export --output type=local,dest=custom-wheels` drops just the wheel.
+# ---------------------------------------------------------------------------
+FROM scratch AS export
+COPY --from=builder /wheels/ /

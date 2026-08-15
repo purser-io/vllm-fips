@@ -1,12 +1,34 @@
 # Security Policy
 
-## Reporting security issues
+> [!IMPORTANT]
+> This repository is `purser-io/vllm-fips`, a Purser-maintained fork of
+> [vllm-project/vllm](https://github.com/vllm-project/vllm). Route reports to
+> whoever can fix them — see [Which project to report to](#which-project-to-report-to).
 
-Please report security issues privately using [the vulnerability submission form](https://github.com/vllm-project/vllm/security/advisories/new).
+## Which project to report to
+
+| Affected component | Report to |
+| --- | --- |
+| Fork-specific: `docker/Dockerfile.opencv-fips`, `tools/check_opencv_fips.py`, `custom-wheels/`, the FIPS wheel itself, or the resolver pinning in `docker/Dockerfile` | **Purser** — GitHub → Security → *Report a vulnerability* on [`purser-io/vllm-fips`](https://github.com/purser-io/vllm-fips/security/advisories/new), or email <security@purser-io.io> |
+| vLLM itself (the engine, API server, scheduler, model code — anything inherited from upstream) | **vLLM** — [upstream vulnerability submission form](https://github.com/vllm-project/vllm/security/advisories/new) |
+| `opencv-python` upstream, independent of this fork's packaging | [opencv/opencv-python](https://github.com/opencv/opencv-python/issues) |
+
+If you are unsure, report to Purser and we will forward upstream under
+coordinated disclosure rather than leave it unreported.
+
+For Purser-handled reports we aim to acknowledge within **3 business days** and
+follow coordinated disclosure (target ≤90 days), matching the policy in
+[`purser-io/purser`](https://github.com/purser-io/purser/blob/main/SECURITY.md).
+
+**Do not open a public issue for a vulnerability in either project.**
+
+## Reporting security issues (upstream vLLM)
+
+Please report security issues in vLLM itself privately using [the vulnerability submission form](https://github.com/vllm-project/vllm/security/advisories/new).
 
 ## Issue triage
 
-Reports will then be triaged by the [vulnerability management team](https://docs.vllm.ai/en/latest/contributing/vulnerability_management.html).
+Reports against upstream vLLM will then be triaged by the [vulnerability management team](https://docs.vllm.ai/en/latest/contributing/vulnerability_management.html). Reports against fork-specific components are triaged by Purser.
 
 ## Threat model
 

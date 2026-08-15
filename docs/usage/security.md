@@ -425,9 +425,110 @@ Hashing is the area where vLLM has explicit FIPS-aware code, but a FIPS-complian
 - **API server TLS.** TLS termination for the OpenAI-compatible API server uses the host's OpenSSL via Python's `ssl` module. Restrict the cipher suite with `--ssl-ciphers` to match your environment's FIPS policy, and ensure server certificates are issued with FIPS-approved algorithms and key sizes.
 - **Outbound HTTPS.** Model and asset downloads (for example, via `huggingface_hub`) use the same host TLS stack. The same provider/cipher considerations apply.
 - **Inter-node communication is unencrypted by default.** As described in [Inter-Node Communication](#inter-node-communication), PyTorch Distributed, KV-cache transfer, and data-parallel channels do not encrypt traffic. FIPS environments that require FIPS-approved cryptography for data in transit must provide that protection externally — for example, via an mTLS sidecar or IPsec terminated by a FIPS-validated module — since vLLM's internal channels cannot satisfy the requirement on their own. Network isolation alone is not cryptography and does not meet a "FIPS-approved cryptography for data in transit" requirement, though it remains a useful defense-in-depth measure.
-- **Dependencies that bundle their own OpenSSL.** Some Python wheels statically link OpenSSL builds that fail the kernel FIPS self-test on FIPS-enabled hosts (`FATAL FIPS SELFTEST FAILURE`). `opencv-python-headless` is a known example; other manylinux wheels may behave similarly. Audit your installed wheels for bundled crypto libraries when troubleshooting FIPS startup failures.
+- **Dependencies that bundle their own OpenSSL.** Some Python wheels statically link OpenSSL builds that fail the kernel FIPS self-test on FIPS-enabled hosts (`FATAL FIPS SELFTEST FAILURE`). `opencv-python-headless` is a known example — see [OpenCV and bundled OpenSSL](#opencv-and-bundled-openssl) below, which this fork addresses directly. Other manylinux wheels may behave similarly. Audit your installed wheels for bundled crypto libraries when troubleshooting FIPS startup failures.
 - **Accelerator and ML libraries.** PyTorch, CUDA, cuDNN, NCCL, and similar components have their own crypto and FIPS posture independent of vLLM. NVIDIA publishes FIPS-validated builds for some libraries; vLLM does not pin to those builds, so selecting and validating them is the operator's responsibility.
 - **What is *not* a FIPS concern in vLLM.** Random number generation used for token sampling (Python/NumPy/PyTorch RNGs) is not a cryptographic use and is out of scope for FIPS. Pickled cache artifacts are a separate security concern covered under [Cache Directory Security](#cache-directory-security).
+
+### OpenCV and bundled OpenSSL
+
+The `opencv-python-headless` wheels published on PyPI bundle their own OpenSSL
+(1.1.1w) inside a vendored FFmpeg, shipped in `opencv_python_headless.libs/`.
+On a FIPS-enabled host that non-validated OpenSSL fails its self-test while the
+extension module is being `dlopen`'d, and aborts the process during
+`import cv2`:
+
+```text
+crypto/fips/fips.c:154: OpenSSL internal error: FATAL FIPS SELFTEST FAILURE
+Aborted (core dumped)
+```
+
+This is a process abort (exit code 134), not a catchable Python exception, so it
+cannot be worked around at runtime — the offending library has to be kept out of
+the image. OpenCV is not optional for vLLM: `mistral_common[image]`, a
+`requirements/common.txt` dependency, requires `opencv-python-headless`
+directly, and `vllm/multimodal/video.py` uses it for video decoding.
+
+Upstream reports are [opencv-python#1184][cv-1184] and [#1191][cv-1191]; the
+fixes in [#1190][cv-1190] and [#1224][cv-1224] are still open, so no released
+PyPI wheel contains them.
+
+[cv-1184]: https://github.com/opencv/opencv-python/issues/1184
+[cv-1191]: https://github.com/opencv/opencv-python/issues/1191
+[cv-1190]: https://github.com/opencv/opencv-python/pull/1190
+[cv-1224]: https://github.com/opencv/opencv-python/pull/1224
+
+**How this fork handles it.** The container images build and install their own
+`opencv-python-headless` wheel with no bundled OpenSSL:
+
+- **Build recipe** — [docker/Dockerfile.opencv-fips](../../docker/Dockerfile.opencv-fips)
+  configures FFmpeg with `--disable-openssl` (plus `--disable-gnutls
+  --disable-mbedtls`, so `configure` cannot substitute another TLS backend).
+  FFmpeg needs OpenSSL only for TLS transports, and vLLM decodes from in-memory
+  buffers rather than URLs, so nothing is lost. This goes further than the
+  upstream PRs, which relink against the *system* OpenSSL and therefore move the
+  dependency onto the host rather than removing it.
+- **FFmpeg is retained.** An OpenCV built without FFmpeg reports `FFMPEG: NO`
+  and exposes no stream-buffered videoio backend — which is exactly what
+  `vllm/multimodal/video.py` requires. Removing FFmpeg "fixes" FIPS by deleting
+  video support, so the build guards against it.
+- **Fail-closed resolution.** The wheel carries a `+fips` local version segment
+  that no PyPI release can satisfy. `docker/Dockerfile` enforces it with a
+  `UV_OVERRIDE` entry plus `UV_FIND_LINKS=/opt/custom-wheels`, which beats both
+  the transitive `mistral_common[image]` requirement and the explicit
+  `opencv-python-headless==4.13.0.90` pin in `requirements/test/*.txt`. A
+  missing or stale wheel is a hard resolution error, never a silent fallback to
+  the crashing upstream build.
+
+    The override lives in the Dockerfile rather than in
+    `requirements/common.txt` on purpose: that file is shared with the CPU,
+    ROCm, TPU, and XPU requirement sets — which have no such wheel — and it
+    feeds the published vLLM wheel's `install_requires`. Pinning a local
+    version there would break those builds and make the published wheel
+    uninstallable from any index.
+- **Verification** — [tools/check_opencv_fips.py](../../tools/check_opencv_fips.py)
+  asserts that no `libssl`/`libcrypto` is bundled in or loaded from the OpenCV
+  install, that FFmpeg and a usable stream-buffered backend are present, and
+  that the installed distribution version matches the pin. It runs in both the
+  `vllm-base` and `test` stages of `docker/Dockerfile`.
+
+!!! note
+    This applies to the container images. If you install vLLM from PyPI into
+    your own environment on a FIPS-enabled host, you will get the stock
+    `opencv-python-headless` wheel and the abort described above. Build the
+    wheel with the recipe referenced here and install it before (or over) the
+    stock one. Note that `requirements/test/*.txt` pin the stock version
+    explicitly, so a bare `uv pip install -r requirements/test/cuda.txt`
+    outside the container images will reintroduce it.
+
+#### Attribution and where to report problems
+
+**Credit.** The abort was diagnosed and reported by the OpenCV community, not
+by this project. The root-cause analysis and both candidate fixes are theirs:
+[opencv-python#1184][cv-1184] and [#1191][cv-1191] (reports),
+[#1190][cv-1190] and [#1224][cv-1224] (fixes). vLLM itself is developed by the
+[vLLM project](https://github.com/vllm-project/vllm). The contribution here is
+narrow: a packaging variant that removes FFmpeg's TLS backend outright rather
+than relinking it, plus the build, pinning, and verification wiring around it.
+
+**Maintainership.** The FIPS-safe wheel, `docker/Dockerfile.opencv-fips`,
+`tools/check_opencv_fips.py`, and the resolver pinning are maintained by
+**Purser** in [`purser-io/vllm-fips`][fork], not by the upstream vLLM or OpenCV
+projects. Prebuilt wheels and their checksums are published as artifacts and
+release assets of that repository.
+
+**Where to report.** Please route reports to whoever can actually act on them:
+
+| Issue | Where |
+| --- | --- |
+| FIPS packaging, the rebuilt wheel, the build recipe, or the gate | Issues on [`purser-io/vllm-fips`][fork] |
+| A vulnerability in any of the above | **Do not open a public issue.** GitHub → Security → *Report a vulnerability* on [`purser-io/vllm-fips`][fork], or email <security@purser-io.io> |
+| A genuine vLLM bug unrelated to FIPS packaging | [vllm-project/vllm](https://github.com/vllm-project/vllm/issues) |
+| A genuine OpenCV or `opencv-python` bug | [opencv/opencv-python](https://github.com/opencv/opencv-python/issues) |
+
+Please do not file FIPS-packaging issues upstream — the wheel is not theirs to
+fix, and duplicate reports add noise to the open PRs above that we want merged.
+
+[fork]: https://github.com/purser-io/vllm-fips
 
 In short: the configuration knobs above let vLLM avoid non-approved algorithms, and the automatic fallbacks let it run without crashing on FIPS-enabled hosts. End-to-end FIPS compliance, however, is a property of the full deployment — host OS, crypto provider, transitive dependencies, and network architecture — not of vLLM alone.
 

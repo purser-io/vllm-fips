@@ -89,3 +89,11 @@ because they may be unable to write to `/home/vllm` or `/opt/uv/cache`.
 ## Build image from source
 
 --8<-- "docs/getting_started/installation/gpu.md:build-image-from-source"
+
+### FIPS-enabled hosts
+
+The images ship a purpose-built `opencv-python-headless` wheel because the
+PyPI wheels bundle an OpenSSL that aborts `import cv2` on FIPS-enabled hosts.
+Building the image therefore has a prerequisite step, described under
+[Build image from source](#build-image-from-source) above; the rationale is in
+[FIPS Compatibility](../usage/security.md#opencv-and-bundled-openssl).

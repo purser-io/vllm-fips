@@ -859,6 +859,15 @@ The three CPU backends are ultimately backed by FFmpeg. `torchcodec` lets you
 choose which FFmpeg version is used while `opencv` and `pyav` rely on whichever
 FFmpeg build they were linked against.
 
+!!! note "FFmpeg linked into the `opencv` backend"
+    The container images ship a purpose-built `opencv-python-headless` wheel
+    whose FFmpeg is compiled without any TLS backend, because the OpenSSL
+    bundled into the PyPI wheels aborts `import cv2` on FIPS-enabled hosts. All
+    decoding is unaffected — vLLM fetches media itself and hands the `opencv`
+    backend an in-memory buffer, so FFmpeg never opens a URL. The only removed
+    capability is FFmpeg dereferencing a TLS URL on its own, which vLLM does not
+    use. See [FIPS Compatibility](../usage/security.md#opencv-and-bundled-openssl).
+
 Select the backend by passing the `backend` parameter via `--media-io-kwargs`:
 
 ```bash

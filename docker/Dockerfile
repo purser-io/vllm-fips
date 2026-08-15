@@ -246,6 +246,39 @@ WORKDIR /workspace
 # We can specify the standard or nightly build of PyTorch
 ARG PYTORCH_NIGHTLY
 
+# FIPS-safe OpenCV wheel. The published opencv-python* manylinux wheels bundle
+# their own OpenSSL inside a vendored FFmpeg; on a FIPS-enabled host that
+# non-validated OpenSSL fails its self-test during dlopen and aborts the
+# process on `import cv2` (exit 134). See opencv/opencv-python#1184 / #1191 --
+# the upstream fixes (#1190, #1224) are still unmerged, so we build our own.
+# Recipe: docker/Dockerfile.opencv-fips. Verifier: tools/check_opencv_fips.py.
+COPY custom-wheels/ /opt/custom-wheels/
+
+# Enforced resolver-wide rather than per-install, for two reasons:
+#   * UV_FIND_LINKS makes the wheel visible to every `uv pip install` in this
+#     stage and its descendants (csrc-build, build, dev) without touching each
+#     command.
+#   * UV_OVERRIDE forces the version even when a *transitive* dependency asks
+#     for something else. `mistral_common[image]` (requirements/common.txt)
+#     depends on opencv-python-headless directly, so a floor in common.txt
+#     alone would still let the crashing PyPI wheel win.
+# The `+fips` local version cannot be satisfied by any PyPI release, so this
+# fails closed: a missing wheel is a resolution error, never a silent fallback.
+#
+# This is deliberately NOT a pin in requirements/common.txt: that file is shared
+# with the cpu/rocm/tpu/xpu requirement sets, which have no such wheel, and
+# setup.py derives the published wheel's install_requires from it.
+ENV UV_FIND_LINKS=/opt/custom-wheels
+ENV UV_OVERRIDE=/etc/uv-overrides.txt
+RUN echo "opencv-python-headless==4.13.0.92+fips" > /etc/uv-overrides.txt \
+    && if ! ls /opt/custom-wheels/opencv_python_headless-*.whl >/dev/null 2>&1; then \
+        echo "FATAL: no FIPS-safe OpenCV wheel in custom-wheels/." >&2; \
+        echo "Build one with:" >&2; \
+        echo "  docker buildx build -f docker/Dockerfile.opencv-fips \\" >&2; \
+        echo "      --target export --output type=local,dest=custom-wheels ." >&2; \
+        exit 1; \
+    fi
+
 # Install build and runtime dependencies, including PyTorch
 # Check whether to install torch nightly instead of release for this build
 COPY requirements/common.txt requirements/common.txt
@@ -740,16 +773,27 @@ RUN mkdir -p "${UV_PYTHON_INSTALL_DIR}" "${UV_CACHE_DIR}" \
     && chgrp -R 0 /opt/uv \
     && chmod -R g+rwX,a+rX /opt/uv
 
-# DeepEPv2 GIN requires NCCL >= 2.30.4 at both compile and runtime. torch pins
-# an older version as a transitive dep; this override forces uv to use our
+# Resolver overrides for this image and everything derived from it.
+#
+# NCCL: DeepEPv2 GIN requires NCCL >= 2.30.4 at both compile and runtime. torch
+# pins an older version as a transitive dep; this override forces uv to use our
 # pinned version whenever nvidia-nccl-cu* is resolved.
+#
+# OpenCV: the published opencv-python* wheels bundle an OpenSSL that aborts
+# `import cv2` on FIPS-enabled hosts (opencv/opencv-python#1184). An *override*
+# rather than a pin is required because the dependency is transitive --
+# `mistral_common[image]` pulls opencv-python-headless directly, and the `test`
+# stage's requirements/test/cuda.txt pins the crashing 4.13.0.90 explicitly.
+# Overrides beat both. The `+fips` local version exists only in
+# /opt/custom-wheels, so this can never resolve to a PyPI wheel.
 RUN CUDA_MAJOR=$(echo $CUDA_VERSION | cut -d. -f1) && \
     if [ -n "$NCCL_VERSION" ]; then \
         echo "nvidia-nccl-cu${CUDA_MAJOR}==${NCCL_VERSION}" \
             > /etc/uv-overrides.txt; \
     else \
         touch /etc/uv-overrides.txt; \
-    fi
+    fi && \
+    echo "opencv-python-headless==4.13.0.92+fips" >> /etc/uv-overrides.txt
 ENV UV_OVERRIDE=/etc/uv-overrides.txt
 
 # ----------------------------------------------------------------------
@@ -797,6 +841,13 @@ ENV VLLM_ENABLE_CUDA_COMPATIBILITY=0
 # Install PyTorch and core CUDA dependencies
 # This is ~2GB and rarely changes
 ARG PYTORCH_CUDA_INDEX_BASE_URL
+
+# FIPS-safe OpenCV wheel (see the UV_OVERRIDE block above). Kept in the final
+# image, not just used at build time, so that derived images and any runtime
+# `uv pip install` still resolve the non-crashing build rather than PyPI's.
+COPY custom-wheels/ /opt/custom-wheels/
+ENV UV_FIND_LINKS=/opt/custom-wheels
+
 COPY requirements/common.txt /tmp/common.txt
 COPY requirements/cuda.txt /tmp/requirements-cuda.txt
 RUN --mount=type=cache,target=/opt/uv/cache \
@@ -852,6 +903,21 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     fi; \
     uv pip install --system accelerate 'modelscope<1.38' \
         "bitsandbytes>=${BITSANDBYTES_VERSION}" "timm${TIMM_VERSION}" "runai-model-streamer[s3,gcs,azure]${RUNAI_MODEL_STREAMER_VERSION}"
+
+# =============================================================
+# OpenCV FIPS gate
+# =============================================================
+# Fails the build if the crashing PyPI wheel won resolution, or if the OpenCV
+# we did get was built without FFmpeg (which would "fix" FIPS by silently
+# removing the stream-buffered videoio backend that vllm/multimodal/video.py
+# needs). Checking cv2.__version__ is not sufficient: it reports the upstream
+# OpenCV version (4.13.0) for both wheels, so the check is on the distribution
+# version plus the actual linked libraries.
+COPY tools/check_opencv_fips.py /tmp/check_opencv_fips.py
+RUN python3 /tmp/check_opencv_fips.py \
+        --require-ffmpeg \
+        --expect-version 4.13.0.92+fips \
+    && rm /tmp/check_opencv_fips.py
 
 # ============================================================
 # VLLM INSTALLATION (depends on build stage)
@@ -980,6 +1046,12 @@ RUN --mount=type=cache,id=uv-v027-ubuntu2204,target=/opt/uv/cache \
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system -e tests/vllm_test_utils
+
+# Re-assert the FIPS gate: requirements/test/cuda.txt pins the crashing PyPI
+# opencv-python-headless==4.13.0.90 explicitly, so this stage is the one most
+# likely to regress if UV_OVERRIDE is ever dropped or bypassed.
+RUN python3 /vllm-workspace/tools/check_opencv_fips.py \
+        --require-ffmpeg --expect-version 4.13.0.92+fips
 
 # enable fast downloads from hf (for testing)
 ENV HF_XET_HIGH_PERFORMANCE 1
