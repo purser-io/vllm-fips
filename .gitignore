@@ -53,6 +53,11 @@ sdist/
 var/
 wheels/
 share/python-wheels/
+
+# Locally built FIPS-safe OpenCV wheel. Reproduced from
+# docker/Dockerfile.opencv-fips rather than committed -- see
+# custom-wheels/README.md.
+custom-wheels/*.whl
 *.egg-info/
 .installed.cfg
 *.egg

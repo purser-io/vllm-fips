@@ -1,0 +1,199 @@
+# Multi-platform build of the FIPS-safe `opencv-python-headless` wheel.
+#
+# Maintained by Purser in purser-io/vllm-fips. The wheels and SHA256SUMS this
+# workflow publishes are the canonical artifacts; consume them with
+#   gh run download --repo purser-io/vllm-fips --name opencv-fips-wheels
+# The underlying diagnosis and upstream fixes are the OpenCV community's work
+# (opencv-python#1184/#1191, #1190/#1224) and are credited in
+# docker/Dockerfile.opencv-fips and docs/usage/security.md.
+#
+# The published PyPI wheels bundle their own OpenSSL inside a vendored FFmpeg.
+# On a FIPS-enabled host that non-validated OpenSSL fails its self-test during
+# dlopen and aborts the process on `import cv2` (exit 134). The upstream fixes
+# (opencv/opencv-python#1190, #1224) are still open, so we build our own.
+# See custom-wheels/README.md for the full rationale.
+#
+# Each architecture builds on a NATIVE runner. Cross-building OpenCV + FFmpeg
+# under QEMU works but is slow enough (hours) to be impractical in CI.
+#
+# `ubuntu-24.04-arm` is a GitHub-hosted arm64 runner: free for public repos,
+# and available on Team/Enterprise plans for private ones. If it is not
+# available to this repo, drop the arm64 matrix entry and build that wheel on
+# a self-hosted arm64 runner -- do not silently fall back to QEMU.
+name: OpenCV FIPS wheel
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - docker/Dockerfile.opencv-fips
+      - tools/check_opencv_fips.py
+      - .github/workflows/opencv-fips-wheel.yml
+  push:
+    branches: [main]
+    paths:
+      - docker/Dockerfile.opencv-fips
+      - tools/check_opencv_fips.py
+      - .github/workflows/opencv-fips-wheel.yml
+  # Deliberately the `release` event rather than a `tags:` push filter: GitHub
+  # ANDs `paths` with `tags`, so a tag push that touches none of the paths
+  # above would never trigger this workflow -- and a release tag almost never
+  # touches them. `paths` does not apply to `release`, so this always fires.
+  release:
+    types: [published]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: wheel (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    # OpenCV + FFmpeg from source; well under this on a warm cache.
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            arch: x86_64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: aarch64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      # The `export` target is a FROM scratch stage holding only the wheel, so
+      # type=local writes the wheel straight into ./wheelhouse. Reaching it
+      # forces the builder stage to complete, which includes the in-build
+      # assertions (FFmpeg not linked to OpenSSL; no OpenSSL in the repaired
+      # wheel; gate script passes).
+      - name: Build wheel (${{ matrix.platform }})
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: docker/Dockerfile.opencv-fips
+          platforms: ${{ matrix.platform }}
+          target: export
+          outputs: type=local,dest=wheelhouse
+          cache-from: type=gha,scope=opencv-fips-${{ matrix.arch }}
+          # ignore-error: a GHA cache-export blip must not fail a build whose
+          # layers all completed. The cache is an optimization, not a gate.
+          cache-to: type=gha,mode=max,ignore-error=true,scope=opencv-fips-${{ matrix.arch }}
+
+      # Guards against the easiest mistake here: producing a wheel for the
+      # wrong architecture. A mismatched wheel does not fail the image build
+      # loudly -- it fails later at dependency resolution, which reads as a
+      # missing package rather than an arch mixup.
+      - name: Assert wheel architecture
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          wheels=(wheelhouse/*.whl)
+          if [[ ${#wheels[@]} -ne 1 ]]; then
+            echo "::error::expected exactly 1 wheel, got ${#wheels[@]}: ${wheels[*]:-none}"
+            exit 1
+          fi
+          name="$(basename "${wheels[0]}")"
+          echo "built: $name"
+          if [[ "$name" != *"${{ matrix.arch }}"* ]]; then
+            echo "::error::wheel $name does not target ${{ matrix.arch }}"
+            exit 1
+          fi
+
+      # The Dockerfile gates the wheel inside the build stage; this re-runs the
+      # gate against the *exported artifact* in a clean interpreter, which is
+      # what downstream images actually install.
+      - name: Verify exported wheel is FIPS-safe and has FFmpeg
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD:/w" -w /w python:3.12-slim bash -euc '
+            pip install --quiet --no-cache-dir wheelhouse/*.whl
+            python tools/check_opencv_fips.py --require-ffmpeg
+          '
+
+      - name: Record checksum
+        run: |
+          set -euo pipefail
+          cd wheelhouse
+          sha256sum ./*.whl | tee "SHA256SUMS.${{ matrix.arch }}"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: opencv-fips-wheel-${{ matrix.arch }}
+          path: |
+            wheelhouse/*.whl
+            wheelhouse/SHA256SUMS.*
+          if-no-files-found: error
+          retention-days: 90
+
+  collect:
+    name: collect wheels
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # attest-build-provenance needs these; the step self-disables on private
+      # repos without the entitlement (see `if:` below).
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: opencv-fips-wheel-*
+          path: wheelhouse
+          merge-multiple: true
+
+      - name: Summarize
+        run: |
+          set -euo pipefail
+          cat wheelhouse/SHA256SUMS.* > wheelhouse/SHA256SUMS
+          {
+            echo '### FIPS-safe OpenCV wheels'
+            echo
+            echo '```'
+            cat wheelhouse/SHA256SUMS
+            echo '```'
+            echo
+            echo 'Drop these into custom-wheels/ before building the vLLM image.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # SLSA provenance for the wheels. Requires a public repo or a paid plan,
+      # so it is skipped rather than failing the run elsewhere.
+      - name: Attest build provenance
+        if: github.event.repository.visibility == 'public'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: wheelhouse/*.whl
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: opencv-fips-wheels
+          path: wheelhouse/
+          if-no-files-found: error
+          retention-days: 90
+
+  release:
+    name: attach to release
+    if: github.event_name == 'release'
+    needs: collect
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: opencv-fips-wheels
+          path: wheelhouse
+      - uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          files: |
+            wheelhouse/*.whl
+            wheelhouse/SHA256SUMS
