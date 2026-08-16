@@ -329,6 +329,12 @@ jobs:
           cache-from: type=registry,ref=${{ env.CACHE }}
           cache-to: type=registry,ref=${{ env.CACHE }}-wolfi,mode=max,ignore-error=true
 
+      - name: Publish wolfi image for inspection
+        run: |
+          set -euo pipefail
+          docker push -q "${IMAGE}:ci-wolfi"
+          echo "pushed ${IMAGE}:ci-wolfi"
+
       - name: Report disk headroom
         if: always()
         run: |
@@ -346,7 +352,7 @@ jobs:
           }
           scan "ghcr.io/${{ github.repository }}:ci-runtime-${{ github.run_id }}" ubuntu.json
           scan "${IMAGE}:ci-wolfi" wolfi.json
-          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import json, collections, pathlib
           def tally(p):
               f = pathlib.Path(p)
