@@ -926,6 +926,28 @@ RUN if [ "${TARGETPLATFORM}" = "linux/amd64" ] \
 
 ENV CRIU_CUDA_PLUGIN_DIR=/usr/local/lib/criu
 
+# Apply security updates to the base OS packages.
+#
+# The CUDA base image lags the Ubuntu archive, so the image shipped libssl3
+# 3.0.2-0ubuntu1.21 with CVE-2026-45447 (heap use-after-free in
+# PKCS7_verify(), fixed in 3.0.2-0ubuntu1.25) -- caught by the Trivy gate in
+# .github/workflows/image.yml. `apt-get install` alone never upgrades packages
+# already present in the base, so they persist for the life of the image.
+#
+# Scoped to openssl rather than a blanket `apt-get upgrade`: the latter would
+# also pull CUDA/NVIDIA packages from NVIDIA's repo, changing the toolkit
+# out from under a pinned CUDA_VERSION. Widen this list when the gate flags
+# something else -- that is the gate's job, and it runs on every image build.
+#
+# The libssl package is libssl3 on Ubuntu 22.04 but libssl3t64 on 24.04, and
+# `--only-upgrade` silently skips a name that is not installed, so upgrade
+# whichever one is actually present.
+RUN apt-get update -y \
+    && apt-get install -y --only-upgrade openssl \
+        $(dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' 'libssl3*' \
+            | awk '$1 == "ii" {print $2}') \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install uv for faster pip installs
 RUN python3 -m pip install uv
 
