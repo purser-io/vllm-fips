@@ -50,6 +50,15 @@ ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-base-ubuntu${UBUNTU_VERSION}
 # FROM to be in global scope.
 ARG WOLFI_IMAGE=cgr.dev/chainguard/wolfi-base:latest
 
+# Source the `vllm-openai-wolfi` stage copies its Python payload and CUDA
+# toolkit from. Defaults to the in-graph `vllm-base` stage, which is correct
+# for a local build. CI overrides it with an already-published image
+# reference: otherwise the Wolfi build has to rebuild the entire upstream
+# graph (base -> csrc-build -> build -> vllm-base, ~50 GB of intermediate
+# stages) just to have something to COPY from, and runs out of disk. Pointing
+# at a published image turns that into a ~8.4 GB pull.
+ARG VLLM_RUNTIME_SRC=vllm-base
+
 # OS family of BUILD_BASE_IMAGE. Controls package manager (apt vs dnf) and
 # Python bootstrap. Set to "manylinux" alongside a manylinux build base such
 # as pytorch/manylinux2_28-builder:cuda13.0 to produce wheels with a glibc
@@ -1233,9 +1242,12 @@ ENTRYPOINT ["/usr/local/bin/vllm-nonroot-entrypoint.sh"]
 # supported target. Do not promote this until it has served real traffic.
 # WOLFI_IMAGE is declared with the other global ARGs at the top of this file:
 # an ARG consumed by FROM must precede the first FROM to be in global scope.
+FROM ${VLLM_RUNTIME_SRC} AS vllm-runtime-src
+
 FROM ${WOLFI_IMAGE} AS vllm-openai-wolfi
 
 ARG PYTHON_VERSION=3.12
+ARG VLLM_RUNTIME_SRC
 ARG VLLM_BUILD_COMMIT
 ARG VLLM_BUILD_PIPELINE
 ARG VLLM_BUILD_URL
@@ -1256,20 +1268,20 @@ RUN apk add --no-cache \
 # and NVIDIA publishes no usable cu13 nvcc wheel (PyPI carries 0.0.1 stubs).
 # These are glibc binaries and Wolfi's glibc is newer, so they run as-is.
 # Needed for the runtime JIT paths (FlashInfer, DeepGEMM, EP kernels).
-COPY --from=vllm-base /usr/local/cuda /usr/local/cuda
+COPY --from=vllm-runtime-src /usr/local/cuda /usr/local/cuda
 
 # The Python payload. Every distribution involved is a manylinux wheel -- a
 # portable file tree with no distro coupling -- so this transplants cleanly
 # between the two glibc distros. Only console-script shebangs, which hardcode
 # the Ubuntu interpreter path, need rewriting.
-COPY --from=vllm-base /usr/local/lib/python${PYTHON_VERSION}/dist-packages \
+COPY --from=vllm-runtime-src /usr/local/lib/python${PYTHON_VERSION}/dist-packages \
      /usr/lib/python${PYTHON_VERSION}/site-packages
-COPY --from=vllm-base /usr/local/bin/vllm /usr/local/bin/vllm
+COPY --from=vllm-runtime-src /usr/local/bin/vllm /usr/local/bin/vllm
 
 # Keep the FIPS wheel and the resolver override, so derived images and any
 # runtime `uv pip install` still resolve the non-crashing OpenCV build.
-COPY --from=vllm-base /opt/custom-wheels /opt/custom-wheels
-COPY --from=vllm-base /etc/uv-overrides.txt /etc/uv-overrides.txt
+COPY --from=vllm-runtime-src /opt/custom-wheels /opt/custom-wheels
+COPY --from=vllm-runtime-src /etc/uv-overrides.txt /etc/uv-overrides.txt
 
 RUN set -eux; \
     py="$(command -v python${PYTHON_VERSION})"; \

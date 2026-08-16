@@ -222,6 +222,17 @@ jobs:
           sys.exit(1 if bad else 0)
           PY
 
+      # Published unconditionally so the Wolfi job can COPY --from this
+      # reference instead of rebuilding base -> csrc-build -> build ->
+      # vllm-base just to have a source. That rebuild is ~50 GB of
+      # intermediate stages and is what exhausted the runner's disk.
+      - name: Publish runtime image for the Wolfi job
+        run: |
+          set -euo pipefail
+          docker tag "${IMAGE}:ci" "${IMAGE}:ci-runtime-${GITHUB_RUN_ID}"
+          docker push -q "${IMAGE}:ci-runtime-${GITHUB_RUN_ID}"
+          echo "runtime source: ${IMAGE}:ci-runtime-${GITHUB_RUN_ID}"
+
       - name: Push to GHCR
         if: github.event_name == 'release' || inputs.push
         run: |
@@ -297,16 +308,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build FIPS OpenCV wheel
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          context: .
-          file: docker/Dockerfile.opencv-fips
-          platforms: linux/amd64
-          target: export
-          outputs: type=local,dest=custom-wheels
-          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache-opencv
-
       - name: Build Wolfi variant
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -314,35 +315,58 @@ jobs:
           file: docker/Dockerfile
           platforms: linux/amd64
           target: vllm-openai-wolfi
-          # Deliberately NOT `load: true`. This stage materialises the payload
-          # twice -- the Ubuntu runtime stage plus the Wolfi copy of
-          # site-packages -- and loading adds a third copy in the daemon. A
-          # hosted runner runs out of room partway through flashinfer_jit_cache.
-          # cacheonly still executes every RUN in the stage, so the import
-          # check and the FIPS gate inside it are exercised; only the export is
-          # skipped. Scanning it needs a larger runner, so the CVE comparison
-          # is deferred rather than half-done.
-          outputs: type=cacheonly
+          # Loadable again now that VLLM_RUNTIME_SRC points at a published
+          # image: this job pulls ~8.4 GB and writes ~8 GB instead of
+          # rebuilding ~50 GB of intermediate stages to have a COPY source.
+          load: true
           tags: ${{ env.IMAGE }}:ci-wolfi
           build-args: |
             VLLM_USE_PRECOMPILED=1
             VLLM_MERGE_BASE_COMMIT=${{ needs.image.outputs.base_sha }}
             torch_cuda_arch_list=9.0
             RUN_WHEEL_CHECK=false
+            VLLM_RUNTIME_SRC=ghcr.io/${{ github.repository }}:ci-runtime-${{ github.run_id }}
           cache-from: type=registry,ref=${{ env.CACHE }}
           cache-to: type=registry,ref=${{ env.CACHE }}-wolfi,mode=max,ignore-error=true
 
-      # The Wolfi image is not loaded (see above), so it cannot be scanned
-      # here. Reaching this point means the stage built and its in-stage import
-      # check and FIPS gate passed. The CVE comparison that justifies this
-      # variant needs a runner with room to hold the image; until then the
-      # claim is unmeasured and the target stays opt-in.
-      - name: Note
+      - name: Report disk headroom
+        if: always()
         run: |
-          {
-            echo "### Wolfi variant"
-            echo
-            echo "Stage built; in-stage import check and FIPS gate passed."
-            echo "CVE comparison deferred: scanning needs a larger runner"
-            echo "(the stage materialises the ~8 GB payload twice)."
-          } >> "$GITHUB_STEP_SUMMARY"
+          echo "free after wolfi build - $(df -h / | awk 'NR==2{print $4}')"
+
+      # The claim behind this variant is fewer CVEs. Measure it: scan both the
+      # published Ubuntu runtime image and the Wolfi one, OS packages only.
+      - name: Compare CVE counts (Ubuntu vs Wolfi)
+        run: |
+          set -uo pipefail
+          scan() {
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+              -v "$PWD:/w" -w /w aquasec/trivy:latest image --quiet \
+              --scanners vuln --format json --output "$2" "$1" || true
+          }
+          scan "ghcr.io/${{ github.repository }}:ci-runtime-${{ github.run_id }}" ubuntu.json
+          scan "${IMAGE}:ci-wolfi" wolfi.json
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, collections, pathlib
+          def tally(p):
+              f = pathlib.Path(p)
+              if not f.exists(): return None
+              c = collections.Counter()
+              for r in (json.loads(f.read_text()).get("Results") or []):
+                  if r.get("Class") != "os-pkgs": continue
+                  for v in (r.get("Vulnerabilities") or []):
+                      c[v.get("Severity", "UNKNOWN")] += 1
+              return c
+          u, w = tally("ubuntu.json"), tally("wolfi.json")
+          print("### OS-package CVEs: Ubuntu vs Wolfi final image\n")
+          if u is None or w is None:
+              print("One or both scans produced no parseable output.")
+          else:
+              print("| Severity | Ubuntu | Wolfi | Delta |")
+              print("| --- | --- | --- | --- |")
+              for s in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"]:
+                  a, b = u.get(s, 0), w.get(s, 0)
+                  print(f"| {s} | {a} | {b} | {b-a:+d} |")
+              ta, tb = sum(u.values()), sum(w.values())
+              print(f"| **Total** | **{ta}** | **{tb}** | **{tb-ta:+d}** |")
+          PY
