@@ -205,7 +205,7 @@ jobs:
       # Gate last, so the SARIF and SBOM are always published even when this
       # fails.
       #
-      # pkg-types: os -- gate on OS packages only. Those are the libraries
+      # vuln-type: os -- gate on OS packages only. Those are the libraries
       # auditwheel vendors into the wheel, i.e. code we actually ship. The
       # builder also carries Python build tooling (pip, setuptools, wheel,
       # scikit-build, auditwheel) that never reaches the artifact: the wheel
@@ -227,7 +227,11 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
           scanners: vuln
-          pkg-types: os
+          # The action's input is `vuln-type`, not `pkg-types` (upstream has a
+          # TODO to rename it); it sets TRIVY_PKG_TYPES. Passing `pkg-types`
+          # here is silently ignored -- unknown action inputs do not error --
+          # which reads as the filter working while it does nothing.
+          vuln-type: os
 
   collect:
     name: collect wheels
