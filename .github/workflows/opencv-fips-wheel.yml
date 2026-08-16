@@ -134,6 +134,88 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+  scan:
+    name: CVE scan (bundled libraries)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      security-events: write   # upload SARIF to code scanning
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      # auditwheel vendors ~17 native libraries into the wheel (libtiff,
+      # libwebp, libpng, libopenjp2, libavcodec, ...). Once vendored they carry
+      # no package metadata, so neither Dependabot nor a scan of the wheel
+      # itself can attribute a CVE to them. The builder image still has them as
+      # dpkg entries with exact versions, so scanning it is what actually
+      # surfaces vulnerabilities in the code we ship inside the wheel.
+      #
+      # x86_64 only: the bundled libraries come from the same Ubuntu 22.04
+      # package set on both arches, so the aarch64 leg would report the same
+      # CVEs. Noted explicitly rather than left as a silent gap.
+      - name: Build builder stage for scanning
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: docker/Dockerfile.opencv-fips
+          platforms: linux/amd64
+          target: builder
+          load: true
+          tags: opencv-fips-builder:scan
+          cache-from: type=gha,scope=opencv-fips-x86_64
+          cache-to: type=gha,mode=max,ignore-error=true,scope=opencv-fips-x86_64
+
+      # Report everything, always. This uploads to code scanning rather than
+      # failing the job, so the findings are visible and triageable.
+      - name: Trivy scan (report to code scanning)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: opencv-fips-builder:scan
+          format: sarif
+          output: trivy.sarif
+          severity: LOW,MEDIUM,HIGH,CRITICAL
+          scanners: vuln
+
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@c16c0f3f2812ec4bb3750a5ed64873fe2ce0fbef # codeql-bundle-v2.26.3
+        with:
+          sarif_file: trivy.sarif
+          category: trivy-opencv-fips-builder
+
+      # SBOM of what the wheel actually vendors, retained alongside the wheels.
+      - name: Generate CycloneDX SBOM
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: opencv-fips-builder:scan
+          format: cyclonedx
+          output: sbom-opencv-fips.cdx.json
+          scanners: vuln
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-opencv-fips
+          path: sbom-opencv-fips.cdx.json
+          if-no-files-found: error
+          retention-days: 90
+
+      # Gate last, so the SARIF and SBOM are always published even when this
+      # fails. --ignore-unfixed: an unfixed upstream CVE is not something this
+      # build can act on, and failing on it would make the gate permanently red
+      # and therefore ignored.
+      - name: Fail on fixable HIGH/CRITICAL
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: opencv-fips-builder:scan
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          scanners: vuln
+
   collect:
     name: collect wheels
     needs: build
@@ -183,7 +265,10 @@ jobs:
   release:
     name: attach to release
     if: github.event_name == 'release'
-    needs: collect
+    # Depends on `scan` as well as `collect`: artifacts are still uploaded by
+    # the earlier jobs for triage, but a release is not published with a
+    # fixable HIGH/CRITICAL in a library the wheel vendors.
+    needs: [collect, scan]
     runs-on: ubuntu-latest
     permissions:
       contents: write

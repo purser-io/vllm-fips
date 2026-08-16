@@ -1,9 +1,10 @@
 name: macOS Apple Silicon Smoke Test
 
+# The daily schedule inherited from upstream is deliberately not enabled here.
+# This fork exists to harden the Linux CUDA container images; a nightly macOS
+# build exercises a path it does not ship, on runners billed at 10x. Kept as a
+# manual trigger so the capability is still available on demand.
 on:
-  schedule:
-    # Daily at 2:30 AM UTC
-    - cron: '30 2 * * *'
   workflow_dispatch:  # Manual trigger
 
 permissions:
