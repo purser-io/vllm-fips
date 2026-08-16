@@ -64,6 +64,11 @@ jobs:
           echo "after:  $(df -h / | awk 'NR==2{print $4}') free"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history and tags: the base-commit resolution below uses
+          # `git describe`, which finds nothing in a shallow checkout.
+          fetch-depth: 0
+          fetch-tags: true
 
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
@@ -81,9 +86,32 @@ jobs:
           cache-from: type=gha,scope=opencv-fips-x86_64
           cache-to: type=gha,mode=max,ignore-error=true,scope=opencv-fips-x86_64
 
-      - name: Resolve precompiled base commit
+      # Must be the UPSTREAM commit this fork is based on, not our HEAD.
+      # Upstream publishes precompiled wheels keyed by their own commits;
+      # passing a fork commit yields a 404 from wheels.vllm.ai and the build
+      # falls through to compiling kernels, which does not fit a hosted runner.
+      #
+      # Derived from the most recent plain upstream release tag, excluding this
+      # fork's `+fips` tags, so it keeps working across rebases onto newer
+      # upstream releases.
+      - name: Resolve upstream base commit
         id: base
-        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          tag="$(git describe --tags --abbrev=0 \
+                   --match 'v[0-9]*.[0-9]*.[0-9]*' --exclude '*fips*' HEAD)"
+          sha="$(git rev-list -1 "$tag")"
+          echo "base tag: $tag  sha: $sha"
+
+          # Fail loudly here rather than 20 minutes into the image build.
+          code="$(curl -fsS -o /dev/null -w '%{http_code}' \
+                    "https://wheels.vllm.ai/${sha}/cu130/" || true)"
+          if [ "$code" != "200" ]; then
+            echo "::error::No cu130 precompiled wheels for ${tag} (${sha}): HTTP ${code}."
+            echo "::error::Upstream may have pruned them, or this fork is based on a commit that never had them."
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
       # Reaching `vllm-openai` runs the FIPS gate in `vllm-base`: no bundled
       # OpenSSL, FFmpeg present, a usable stream-buffered backend, and the
