@@ -60,6 +60,24 @@ jobs:
     outputs:
       base_sha: ${{ steps.base.outputs.sha }}
     steps:
+      # Load-bearing, despite appearances. The runner starts with ~87 GB free
+      # and this recovers ~24 GB. Removing it once on the assumption that 87 GB
+      # was plenty produced:
+      #   write /usr/local/cuda-13.0/.../libnvrtc.alt.so.13.0.88:
+      #   no space left on device
+      # during the export/import phase, where the image exists twice at once
+      # (buildkit's copy plus the daemon's, on top of the pulled registry
+      # cache). Check the reported margin below before trimming this again.
+      - name: Free disk space
+        run: |
+          set -euo pipefail
+          echo "before: $(df -h / | awk 'NR==2{print $4}') free"
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /usr/local/share/powershell \
+                      /usr/share/swift /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          echo "after:  $(df -h / | awk 'NR==2{print $4}') free"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Full history and tags: the base resolution below uses git describe.
@@ -128,6 +146,14 @@ jobs:
             RUN_WHEEL_CHECK=false
           cache-from: type=registry,ref=${{ env.CACHE }}
           cache-to: type=registry,ref=${{ env.CACHE }},mode=max,ignore-error=true
+
+      # Record the margin so the disk headroom is a measured number rather
+      # than an assumption the next time someone trims the cleanup step.
+      - name: Report disk headroom
+        if: always()
+        run: |
+          echo "free after image build: $(df -h / | awk 'NR==2{print $4}')" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Verify FIPS properties in the built image
         run: |
