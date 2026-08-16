@@ -45,6 +45,11 @@ ARG BUILD_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
 # Using cuda base image with minimal dependencies necessary for JIT compilation (FlashInfer, DeepGEMM, EP kernels)
 ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-base-ubuntu${UBUNTU_VERSION}
 
+# Base for the opt-in `vllm-openai-wolfi` target at the end of this file.
+# Must be declared here: an ARG referenced by a FROM has to precede the first
+# FROM to be in global scope.
+ARG WOLFI_IMAGE=cgr.dev/chainguard/wolfi-base:latest
+
 # OS family of BUILD_BASE_IMAGE. Controls package manager (apt vs dnf) and
 # Python bootstrap. Set to "manylinux" alongside a manylinux build base such
 # as pytorch/manylinux2_28-builder:cuda13.0 to produce wheels with a glibc
@@ -1204,3 +1209,101 @@ USER vllm
 WORKDIR /home/vllm
 ENTRYPOINT ["/usr/local/bin/vllm-nonroot-entrypoint.sh"]
 #################### OPENAI API SERVER (NON-ROOT, OPT-IN) ####################
+
+#################### WOLFI FINAL IMAGE (OPT-IN) ####################
+# A minimal-userland variant of `vllm-openai` built on Chainguard's Wolfi.
+#
+# Purpose is CVE surface, NOT size. The OS layer is ~140MB of an ~8.4GB image,
+# so this saves ~1.5% at best -- the weight is PyTorch, the nvidia-* wheels,
+# and vLLM's compiled kernels, none of which this changes. What it does remove
+# is the Ubuntu userland (apt, dpkg, and the rest) and, more importantly, the
+# lag: the CUDA base image shipped libssl3 four patch versions behind the
+# Ubuntu archive, carrying a fixable HIGH (CVE-2026-45447). Wolfi tracks
+# upstream far more closely.
+#
+# Viable because both distros are glibc: Wolfi ships 2.43 against Ubuntu's
+# 2.35, so every manylinux wheel here -- including our manylinux_2_35 FIPS
+# OpenCV build -- runs unchanged. This is why Wolfi works where Alpine (musl)
+# would not.
+#
+# Build:
+#   docker build --target vllm-openai-wolfi -f docker/Dockerfile .
+#
+# STATUS: opt-in and unvalidated on GPU hardware. `vllm-openai` remains the
+# supported target. Do not promote this until it has served real traffic.
+# WOLFI_IMAGE is declared with the other global ARGs at the top of this file:
+# an ARG consumed by FROM must precede the first FROM to be in global scope.
+FROM ${WOLFI_IMAGE} AS vllm-openai-wolfi
+
+ARG PYTHON_VERSION=3.12
+ARG VLLM_BUILD_COMMIT
+ARG VLLM_BUILD_PIPELINE
+ARG VLLM_BUILD_URL
+ARG VLLM_IMAGE_TAG
+
+# Runtime only. No compilers, no package tooling beyond apk itself.
+# libgomp: OpenMP runtime torch links against.
+# numactl: provides libnuma plus the CLI used for NUMA binding at runtime.
+RUN apk add --no-cache \
+        python-${PYTHON_VERSION} \
+        libgomp \
+        libstdc++ \
+        numactl \
+        bash \
+        ca-certificates
+
+# CUDA toolkit, copied rather than installed: Wolfi has no NVIDIA packages,
+# and NVIDIA publishes no usable cu13 nvcc wheel (PyPI carries 0.0.1 stubs).
+# These are glibc binaries and Wolfi's glibc is newer, so they run as-is.
+# Needed for the runtime JIT paths (FlashInfer, DeepGEMM, EP kernels).
+COPY --from=vllm-base /usr/local/cuda /usr/local/cuda
+
+# The Python payload. Every distribution involved is a manylinux wheel -- a
+# portable file tree with no distro coupling -- so this transplants cleanly
+# between the two glibc distros. Only console-script shebangs, which hardcode
+# the Ubuntu interpreter path, need rewriting.
+COPY --from=vllm-base /usr/local/lib/python${PYTHON_VERSION}/dist-packages \
+     /usr/lib/python${PYTHON_VERSION}/site-packages
+COPY --from=vllm-base /usr/local/bin/vllm /usr/local/bin/vllm
+
+# Keep the FIPS wheel and the resolver override, so derived images and any
+# runtime `uv pip install` still resolve the non-crashing OpenCV build.
+COPY --from=vllm-base /opt/custom-wheels /opt/custom-wheels
+COPY --from=vllm-base /etc/uv-overrides.txt /etc/uv-overrides.txt
+
+RUN set -eux; \
+    py="$(command -v python${PYTHON_VERSION})"; \
+    # Point console scripts at Wolfi's interpreter.
+    sed -i "1s|^#!.*python.*|#!${py}|" /usr/local/bin/vllm; \
+    # Fail now, not at first serve, if the transplant did not take.
+    "$py" -c "import vllm, torch; print('vllm', vllm.__version__, '| torch', torch.__version__)"
+
+ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/local/cuda/lib64
+ENV PATH=/usr/local/cuda/bin:$PATH
+ENV UV_OVERRIDE=/etc/uv-overrides.txt
+ENV UV_FIND_LINKS=/opt/custom-wheels
+ENV VLLM_USAGE_SOURCE=production-docker-image
+ENV VLLM_ENABLE_CUDA_COMPATIBILITY=0
+
+# Same FIPS gate as the Ubuntu image. A minimal base is worthless if the
+# transplant silently dropped the OpenCV build it was hardened around.
+COPY tools/check_opencv_fips.py /tmp/check_opencv_fips.py
+RUN python${PYTHON_VERSION} /tmp/check_opencv_fips.py \
+        --require-ffmpeg --expect-version 4.13.0.92+fips \
+    && rm /tmp/check_opencv_fips.py
+
+# Non-root support, matching the Ubuntu image: UID 2000, GID 0, group-writable
+# home so arbitrary OpenShift-style UIDs in group 0 also work.
+RUN adduser -D -u 2000 -G root -h /home/vllm -s /bin/bash vllm \
+    && mkdir -p /home/vllm/.cache /home/vllm/.config \
+    && chown -R 2000:0 /home/vllm \
+    && chmod -R g+rwX /home/vllm
+
+LABEL org.opencontainers.image.source="https://github.com/purser-io/vllm-fips" \
+      org.opencontainers.image.revision="${VLLM_BUILD_COMMIT}" \
+      org.opencontainers.image.version="${VLLM_IMAGE_TAG}" \
+      org.opencontainers.image.base.name="cgr.dev/chainguard/wolfi-base" \
+      ai.vllm.build.commit="${VLLM_BUILD_COMMIT}"
+
+ENTRYPOINT ["vllm", "serve"]
+#################### WOLFI FINAL IMAGE (OPT-IN) ####################
