@@ -98,8 +98,18 @@ jobs:
         id: base
         run: |
           set -euo pipefail
-          tag="$(git describe --tags --abbrev=0 \
-                   --match 'v[0-9]*.[0-9]*.[0-9]*' --exclude '*fips*' HEAD)"
+          # `git push` does not push tags, so a fork can easily end up with
+          # only its own +fips tags and none of upstream's -- in which case
+          # this finds nothing and git fails with an unhelpful
+          # "No names found, cannot describe anything".
+          if ! tag="$(git describe --tags --abbrev=0 \
+                        --match 'v[0-9]*.[0-9]*.[0-9]*' --exclude '*fips*' \
+                        HEAD 2>/dev/null)"; then
+            echo "::error::No upstream release tag reachable from HEAD."
+            echo "::error::This fork must carry the upstream tag it is based on:"
+            echo "::error::  git push origin refs/tags/vX.Y.Z"
+            exit 1
+          fi
           sha="$(git rev-list -1 "$tag")"
           echo "base tag: $tag  sha: $sha"
 
