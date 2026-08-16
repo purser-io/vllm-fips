@@ -55,6 +55,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     # OpenCV + FFmpeg from source; well under this on a warm cache.
     timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write   # registry build cache lives in GHCR
     strategy:
       fail-fast: false
       matrix:
@@ -70,6 +73,13 @@ jobs:
 
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       # The `export` target is a FROM scratch stage holding only the wheel, so
       # type=local writes the wheel straight into ./wheelhouse. Reaching it
       # forces the builder stage to complete, which includes the in-build
@@ -83,10 +93,10 @@ jobs:
           platforms: ${{ matrix.platform }}
           target: export
           outputs: type=local,dest=wheelhouse
-          cache-from: type=gha,scope=opencv-fips-${{ matrix.arch }}
-          # ignore-error: a GHA cache-export blip must not fail a build whose
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache-opencv-${{ matrix.arch }}
+          # ignore-error: a cache-export blip must not fail a build whose
           # layers all completed. The cache is an optimization, not a gate.
-          cache-to: type=gha,mode=max,ignore-error=true,scope=opencv-fips-${{ matrix.arch }}
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache-opencv-${{ matrix.arch }},mode=max,ignore-error=true
 
       # Guards against the easiest mistake here: producing a wheel for the
       # wrong architecture. A mismatched wheel does not fail the image build
@@ -141,11 +151,19 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
+      packages: read           # read the registry build cache
       security-events: write   # upload SARIF to code scanning
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       # auditwheel vendors ~17 native libraries into the wheel (libtiff,
       # libwebp, libpng, libopenjp2, libavcodec, ...). Once vendored they carry
@@ -166,8 +184,7 @@ jobs:
           target: builder
           load: true
           tags: opencv-fips-builder:scan
-          cache-from: type=gha,scope=opencv-fips-x86_64
-          cache-to: type=gha,mode=max,ignore-error=true,scope=opencv-fips-x86_64
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache-opencv-x86_64
 
       # Report everything, always. This uploads to code scanning rather than
       # failing the job, so the findings are visible and triageable.
