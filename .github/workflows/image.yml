@@ -306,7 +306,15 @@ jobs:
           file: docker/Dockerfile
           platforms: linux/amd64
           target: vllm-openai-wolfi
-          load: true
+          # Deliberately NOT `load: true`. This stage materialises the payload
+          # twice -- the Ubuntu runtime stage plus the Wolfi copy of
+          # site-packages -- and loading adds a third copy in the daemon. A
+          # hosted runner runs out of room partway through flashinfer_jit_cache.
+          # cacheonly still executes every RUN in the stage, so the import
+          # check and the FIPS gate inside it are exercised; only the export is
+          # skipped. Scanning it needs a larger runner, so the CVE comparison
+          # is deferred rather than half-done.
+          outputs: type=cacheonly
           tags: ${{ env.IMAGE }}:ci-wolfi
           build-args: |
             VLLM_USE_PRECOMPILED=1
@@ -316,38 +324,17 @@ jobs:
           cache-from: type=registry,ref=${{ env.CACHE }}
           cache-to: type=registry,ref=${{ env.CACHE }}-wolfi,mode=max,ignore-error=true
 
-      - name: Compare CVE counts (Ubuntu vs Wolfi)
+      # The Wolfi image is not loaded (see above), so it cannot be scanned
+      # here. Reaching this point means the stage built and its in-stage import
+      # check and FIPS gate passed. The CVE comparison that justifies this
+      # variant needs a runner with room to hold the image; until then the
+      # claim is unmeasured and the target stays opt-in.
+      - name: Note
         run: |
-          set -uo pipefail
-          docker pull -q "${IMAGE}:buildcache" >/dev/null 2>&1 || true
-          for t in ci-wolfi; do
-            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-              -v "$PWD:/w" -w /w aquasec/trivy:latest image --quiet \
-              --scanners vuln --format json --output "trivy-$t.json" \
-              "${IMAGE}:$t" || true
-          done
-          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
-          import json, collections, pathlib
-          def tally(p):
-              f = pathlib.Path(p)
-              if not f.exists():
-                  return None
-              c = collections.Counter()
-              for r in (json.loads(f.read_text()).get("Results") or []):
-                  if r.get("Class") != "os-pkgs":
-                      continue
-                  for v in (r.get("Vulnerabilities") or []):
-                      c[v.get("Severity", "UNKNOWN")] += 1
-              return c
-          w = tally("trivy-ci-wolfi.json")
-          print("### Wolfi variant: OS-package CVEs\n")
-          if w is None:
-              print("Scan produced no parseable output.")
-          else:
-              print("| Severity | Count |")
-              print("| --- | --- |")
-              for s in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"]:
-                  print(f"| {s} | {w.get(s, 0)} |")
-              print(f"| **Total** | **{sum(w.values())}** |")
-              print("\nCompare against the Ubuntu image's OS-package count in the `image` job.")
-          PY
+          {
+            echo "### Wolfi variant"
+            echo
+            echo "Stage built; in-stage import check and FIPS gate passed."
+            echo "CVE comparison deferred: scanning needs a larger runner"
+            echo "(the stage materialises the ~8 GB payload twice)."
+          } >> "$GITHUB_STEP_SUMMARY"
