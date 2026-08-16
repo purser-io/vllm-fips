@@ -756,6 +756,22 @@ RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
         numactl && \
     rm -rf /var/lib/apt/lists/*
 
+# Apply security updates to the base OS packages.
+#
+# The CUDA base image lags the Ubuntu archive, so the image shipped libssl3
+# 3.0.2-0ubuntu1.21 with CVE-2026-45447 (heap use-after-free in
+# PKCS7_verify(), fixed in 3.0.2-0ubuntu1.25) -- caught by the Trivy gate in
+# .github/workflows/image.yml. `apt-get install` alone never upgrades packages
+# already present in the base, so they persist for the life of the image.
+#
+# Scoped to openssl rather than a blanket `apt-get upgrade`: the latter would
+# also pull CUDA/NVIDIA packages from NVIDIA's repo, changing the toolkit
+# out from under a pinned CUDA_VERSION. Widen this list when the gate flags
+# something else -- that is the gate's job, and it runs on every image build.
+RUN apt-get update -y \
+    && apt-get install -y --only-upgrade openssl libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install uv for faster pip installs
 RUN python3 -m pip install uv
 
