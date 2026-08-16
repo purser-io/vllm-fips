@@ -264,6 +264,20 @@ jobs:
       contents: read
       packages: write
     steps:
+      # Same reason as the image job: the runner starts at ~87 GB and this
+      # recovers ~24 GB. Omitting it here (it was only restored in the image
+      # job) is what killed the first Wolfi run -- 23 min in, the log simply
+      # stopped with no error, which is what running out of room looks like.
+      - name: Free disk space
+        run: |
+          set -euo pipefail
+          echo "before: $(df -h / | awk 'NR==2{print $4}') free"
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /usr/local/share/powershell \
+                      /usr/share/swift /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          echo "after:  $(df -h / | awk 'NR==2{print $4}') free"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
