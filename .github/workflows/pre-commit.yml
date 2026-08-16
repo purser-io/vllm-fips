@@ -1,8 +1,27 @@
+# Lint gate for purser-io/vllm-fips.
+#
+# Diverges from upstream vLLM's workflow in two ways, both required for this
+# fork to have a working gate at all:
+#
+#   * No maintainer label gate. Upstream requires a PR to carry a `verified` /
+#     `ready` / `ready-run-all-tests` label (or an author with 4+ merged PRs)
+#     before linting runs. That is vLLM's governance model; nobody applies
+#     those labels here, so every PR failed the gate and the lint job was
+#     skipped -- lint never actually ran.
+#   * GitHub-hosted runner. Upstream targets `[self-hosted, linux, x64,
+#     vllm-runners]`, a pool this fork does not have, so the job would queue
+#     forever.
+#
+# Scoped to changed files rather than `--all-files`: this fork carries all of
+# upstream's tree, and linting it wholesale would go red on pre-existing
+# upstream findings that are not ours to fix, making the gate useless. Hooks
+# are `files:`-scoped, so touching a requirements file still runs pip-compile,
+# touching a Dockerfile still runs the graph check, and so on.
 name: pre-commit
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
+    types: [opened, synchronize, reopened]
   push:
     branches: [main]
 
@@ -12,54 +31,57 @@ concurrency:
 
 permissions:
   contents: read
-  pull-requests: read
 
 jobs:
-  pre-run-check:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-    - name: Check PR label and author merge count
-      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-      with:
-        script: |
-          const { data: pr } = await github.rest.pulls.get({
-            ...context.repo,
-            pull_number: context.payload.pull_request.number,
-          });
-
-          const readyLabels = ['ready', 'ready-run-all-tests'];
-          const hasReadyLabel = pr.labels.some(l => readyLabels.includes(l.name));
-          const hasVerifiedLabel = pr.labels.some(l => l.name === 'verified');
-
-          const { data: mergedPRs } = await github.rest.search.issuesAndPullRequests({
-            q: `repo:${context.repo.owner}/${context.repo.repo} is:pr is:merged author:${pr.user.login}`,
-            per_page: 4,
-          });
-          const mergedCount = mergedPRs.total_count;
-
-          if (hasReadyLabel || hasVerifiedLabel || mergedCount >= 4) {
-            core.info(`Check passed: verified label=${hasVerifiedLabel}, ready label=${hasReadyLabel}, 4+ merged PRs=${mergedCount >= 4}`);
-          } else {
-            core.setFailed(`PR must have the 'verified', 'ready', or 'ready-run-all-tests' label to run pre-commit, or the author must have at least 4 merged PRs (found ${mergedCount}).`);
-          }
-
   pre-commit:
-    needs: pre-run-check
-    if: always() && (needs.pre-run-check.result == 'success' || needs.pre-run-check.result == 'skipped')
-    runs-on: [self-hosted, linux, x64, vllm-runners]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-    - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
-      with:
-        python-version: "3.12"
-    # Provide shellcheck on PATH so tools/pre_commit/shellcheck.sh skips its
-    # wget + tar -xJ self-download, which the self-hosted runner image lacks
-    # (no wget/xz). Pinned to shellcheck 0.10.0 to match the script's "stable".
-    - run: python -m pip install shellcheck-py==0.10.0.1
-    - run: echo "::add-matcher::.github/workflows/matchers/actionlint.json"
-    - run: echo "::add-matcher::.github/workflows/matchers/markdownlint.json"
-    - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
-    - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
-      with:
-        extra_args: --all-files --hook-stage manual
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history so the diff range below can be resolved.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.12"
+
+      # Provide shellcheck on PATH so tools/pre_commit/shellcheck.sh skips its
+      # wget + tar -xJ self-download. Pinned to match the script's "stable".
+      - run: python -m pip install shellcheck-py==0.10.0.1 pre-commit
+
+      - run: echo "::add-matcher::.github/workflows/matchers/actionlint.json"
+      - run: echo "::add-matcher::.github/workflows/matchers/markdownlint.json"
+      - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
+
+      - name: Resolve diff range
+        id: range
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "pull_request" ]; then
+            from="$BASE_SHA"
+          else
+            from="$BEFORE_SHA"
+          fi
+          # A branch's first push reports an all-zero `before`, and a force-push
+          # can name a commit that no longer exists. Fall back to the parent so
+          # the run lints something real instead of failing on a bad ref.
+          if [ -z "$from" ] \
+             || [ "$from" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "${from}^{commit}" 2>/dev/null; then
+            from="$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)"
+            echo "::notice::No usable base ref; linting against ${from}"
+          fi
+          echo "from=$from" >> "$GITHUB_OUTPUT"
+          echo "Linting ${from}..$(git rev-parse HEAD)"
+
+      - name: Run pre-commit on changed files
+        run: |
+          pre-commit run \
+            --from-ref "${{ steps.range.outputs.from }}" \
+            --to-ref "$(git rev-parse HEAD)" \
+            --show-diff-on-failure --color=always
