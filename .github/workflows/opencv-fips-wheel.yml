@@ -203,10 +203,22 @@ jobs:
           retention-days: 90
 
       # Gate last, so the SARIF and SBOM are always published even when this
-      # fails. --ignore-unfixed: an unfixed upstream CVE is not something this
-      # build can act on, and failing on it would make the gate permanently red
-      # and therefore ignored.
-      - name: Fail on fixable HIGH/CRITICAL
+      # fails.
+      #
+      # pkg-types: os -- gate on OS packages only. Those are the libraries
+      # auditwheel vendors into the wheel, i.e. code we actually ship. The
+      # builder also carries Python build tooling (pip, setuptools, wheel,
+      # scikit-build, auditwheel) that never reaches the artifact: the wheel
+      # contains only cv2/ and opencv_python_headless.libs/, no Python
+      # packages. Gating on those produced failures for msgpack vendored inside
+      # pip and for the setuptools wheel bundled in python3.12-venv's
+      # ensurepip/_bundled/ -- neither installed nor shipped. A gate that is red
+      # for things absent from the artifact is one people learn to ignore.
+      # Python findings are still reported to code scanning above.
+      #
+      # ignore-unfixed -- an unfixed upstream CVE is not actionable in this
+      # build, and a permanently red gate is an ignored gate.
+      - name: Fail on fixable HIGH/CRITICAL in shipped libraries
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: opencv-fips-builder:scan
@@ -215,6 +227,7 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
           scanners: vuln
+          pkg-types: os
 
   collect:
     name: collect wheels
