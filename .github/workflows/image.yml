@@ -22,8 +22,16 @@
 #   * The Wolfi job `needs: image` rather than running in parallel: it shares
 #     every stage up to vllm-base, so once the first job has populated the
 #     registry cache it only has to build its own final stage.
-#   * No disk-cleanup step. The runner reports 87 GB free before cleanup; the
-#     step cost 1.3 min to free space we were never short of.
+#   * The disk-cleanup step stays. It looks like dead weight at 1.3 min, but
+#     the runner starts at ~87 GB and it recovers ~24 GB that the export phase
+#     genuinely needs; removing it produced ENOSPC on libnvrtc.
+#
+# Measured after these changes: Build image 35.9 min, single Trivy pass 4.8
+# min, ~42 min total (was ~61). The residual is dominated by work a layer
+# cache cannot help with -- rust-build 9.4 min and extensions-build 5.5 min
+# both use `--mount=type=cache`, which is builder-local and never persisted by
+# a registry cache export, plus ~9.4 min of layer export and tarball load
+# inherent to producing an 8.4 GB image with `load: true`.
 name: Image
 
 on:
