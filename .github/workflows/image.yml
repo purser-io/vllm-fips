@@ -370,19 +370,38 @@ jobs:
           python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import json, collections, pathlib
           def tally(p):
+              """Return (severity counts, os packages seen, detected OS).
+
+              The package count matters: Trivy reports zero vulnerabilities
+              both for a genuinely clean image and for one whose OS it cannot
+              identify. Without the package count those are indistinguishable,
+              and a false zero would read as a spectacular result.
+              """
               f = pathlib.Path(p)
               if not f.exists(): return None
-              c = collections.Counter()
-              for r in (json.loads(f.read_text()).get("Results") or []):
+              d = json.loads(f.read_text())
+              c = collections.Counter(); pkgs = 0
+              for r in (d.get("Results") or []):
                   if r.get("Class") != "os-pkgs": continue
+                  pkgs += len(r.get("Packages") or [])
                   for v in (r.get("Vulnerabilities") or []):
                       c[v.get("Severity", "UNKNOWN")] += 1
-              return c
-          u, w = tally("trivy.json"), tally("wolfi.json")
+              osinfo = (d.get("Metadata") or {}).get("OS") or {}
+              return c, pkgs, f"{osinfo.get('Family','?')} {osinfo.get('Name','?')}"
+          U, W = tally("trivy.json"), tally("wolfi.json")
           print("### OS-package CVEs: Ubuntu vs Wolfi final image\n")
-          if u is None or w is None:
-              print(f"missing report - ubuntu={u is not None} wolfi={w is not None}")
+          if U is None or W is None:
+              print(f"missing report - ubuntu={U is not None} wolfi={W is not None}")
           else:
+              u, up, uos = U; w, wp, wos = W
+              print(f"- Ubuntu: `{uos}`, {up} OS packages scanned")
+              print(f"- Wolfi: `{wos}`, {wp} OS packages scanned")
+              if wp == 0:
+                  print("\n> **A zero package count means Trivy did not enumerate")
+                  print("> Wolfi's packages, so the CVE figures below are not a")
+                  print("> clean bill of health.**\n")
+              else:
+                  print("")
               print("| Severity | Ubuntu | Wolfi | Delta |")
               print("| --- | --- | --- | --- |")
               for s in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"]:
