@@ -178,7 +178,7 @@ jobs:
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$PWD:/w" -w /w \
             aquasec/trivy:latest image \
-              --scanners vuln --list-all-pkgs \
+              --timeout 30m --scanners vuln --list-all-pkgs \
               --format json --output trivy.json \
               "${IMAGE}:ci"
           docker run --rm -v "$PWD:/w" -w /w aquasec/trivy:latest \
@@ -191,6 +191,15 @@ jobs:
         with:
           sarif_file: trivy.sarif
           category: trivy-vllm-image
+
+      # Reused by the wolfi job for the CVE comparison, so the 8.4 GB Ubuntu
+      # image is analysed once per run instead of once per job.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: trivy-ubuntu
+          path: trivy.json
+          if-no-files-found: error
+          retention-days: 7
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -342,16 +351,22 @@ jobs:
 
       # The claim behind this variant is fewer CVEs. Measure it: scan both the
       # published Ubuntu runtime image and the Wolfi one, OS packages only.
+      - name: Fetch the Ubuntu image's scan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: trivy-ubuntu
+
       - name: Compare CVE counts (Ubuntu vs Wolfi)
         run: |
           set -uo pipefail
-          scan() {
-            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-              -v "$PWD:/w" -w /w aquasec/trivy:latest image --quiet \
-              --scanners vuln --format json --output "$2" "$1" || true
-          }
-          scan "ghcr.io/${{ github.repository }}:ci-runtime-${{ github.run_id }}" ubuntu.json
-          scan "${IMAGE}:ci-wolfi" wolfi.json
+          # --timeout: the default 5 min is not enough for a multi-GB image;
+          # the first attempt died with "context deadline exceeded".
+          # Only the Wolfi image is scanned here -- the Ubuntu report comes
+          # from the image job, which already produced it.
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD:/w" -w /w aquasec/trivy:latest image --quiet \
+            --timeout 30m --scanners vuln \
+            --format json --output wolfi.json "${IMAGE}:ci-wolfi"
           python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import json, collections, pathlib
           def tally(p):
@@ -363,10 +378,10 @@ jobs:
                   for v in (r.get("Vulnerabilities") or []):
                       c[v.get("Severity", "UNKNOWN")] += 1
               return c
-          u, w = tally("ubuntu.json"), tally("wolfi.json")
+          u, w = tally("trivy.json"), tally("wolfi.json")
           print("### OS-package CVEs: Ubuntu vs Wolfi final image\n")
           if u is None or w is None:
-              print("One or both scans produced no parseable output.")
+              print(f"missing report - ubuntu={u is not None} wolfi={w is not None}")
           else:
               print("| Severity | Ubuntu | Wolfi | Delta |")
               print("| --- | --- | --- | --- |")
