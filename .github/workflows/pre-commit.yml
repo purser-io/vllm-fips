@@ -78,6 +78,11 @@ jobs:
           echo "from=$from" >> "$GITHUB_OUTPUT"
           echo "Linting ${from}..$(git rev-parse HEAD)"
 
+      # Full-tree, not changed-files: each rebase onto a new upstream release
+      # can bring in hash calls that abort on FIPS hosts.
+      - name: Check vllm/ for FIPS-unsafe hash calls
+        run: python tools/pre_commit/check_fips_hashlib.py $(git ls-files 'vllm/*.py')
+
       - name: Run pre-commit on changed files
         run: |
           pre-commit run \

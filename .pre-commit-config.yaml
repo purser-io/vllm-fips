@@ -267,6 +267,11 @@ repos:
     language: python
     types: [python]
     additional_dependencies: [regex]
+  - id: check-fips-hashlib
+    name: Check for hash calls that crash on FIPS hosts
+    entry: python tools/pre_commit/check_fips_hashlib.py
+    language: python
+    files: ^vllm/.*\.py$
   # prevent use torch.cuda APIs
   - id: check-torch-cuda-call
     name: "Prevent new 'torch.cuda' APIs call"
