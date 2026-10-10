@@ -170,6 +170,29 @@ jobs:
             "${IMAGE}:ci" /t/check_opencv_fips.py \
               --require-ffmpeg --expect-version 4.13.0.92+fips
 
+      # OPENSSL_FORCE_FIPS_MODE=1 drives Ubuntu's OpenSSL down the same path as
+      # a fips=1 kernel (checked against a real one). Without the bundled FIPS
+      # provider, that path cannot create a TLS context and vLLM fails at
+      # import. `vllm serve` itself needs a GPU, which hosted runners lack,
+      # so the shipped ENTRYPOINT is asserted to route through the wrapper.
+      - name: Verify the image starts and is FIPS-restricted in FIPS mode
+        run: |
+          set -euo pipefail
+          # The bare second check is what a `docker exec`'d process sees.
+          docker run --rm -e OPENSSL_FORCE_FIPS_MODE=1 -v "$PWD/tools:/t:ro" \
+            --entrypoint /usr/local/bin/vllm-fips-entrypoint \
+            "${IMAGE}:ci" sh -c 'python3 /t/check_fips_runtime.py &&
+                                 python3 /t/check_fips_runtime.py --skip-vllm'
+          # fipsinstall output is per machine and must never ship.
+          docker run --rm --entrypoint sh "${IMAGE}:ci" \
+            -c 'test -z "$(ls -A /etc/ssl/vllm-fips.d)"'
+          ep="$(docker image inspect --format '{{json .Config.Entrypoint}}' "${IMAGE}:ci")"
+          want='["/usr/local/bin/vllm-fips-entrypoint","vllm","serve"]'
+          if [ "$ep" != "$want" ]; then
+            echo "::error::ENTRYPOINT is $ep, expected $want"
+            exit 1
+          fi
+
       # One analysis of the image; everything else is derived from the report.
       - name: Scan image (single pass)
         run: |

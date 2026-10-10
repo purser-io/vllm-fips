@@ -527,11 +527,9 @@ PyPI wheel contains them.
     outside the container images will reintroduce it.
 
 !!! note
-    The Ubuntu-based images link Python against Ubuntu's OpenSSL, which does
-    not load a FIPS provider even when the host kernel boots with `fips=1`.
-    Inside those images `hashlib` is therefore not FIPS-enforcing, and the
-    hash-algorithm settings above are the operator's control. Python from a
-    FIPS-validated distribution, as on a RHEL host, does enforce it.
+    OpenCV is not the only FIPS problem in a container image. See
+    [OpenSSL FIPS provider in the container images](#openssl-fips-provider-in-the-container-images)
+    below.
 
 #### Attribution and where to report problems
 
@@ -562,6 +560,75 @@ Please do not file FIPS-packaging issues upstream — the wheel is not theirs to
 fix, and duplicate reports add noise to the open PRs above that we want merged.
 
 [fork]: https://github.com/purser-io/vllm-fips
+
+### OpenSSL FIPS provider in the container images
+
+When the host kernel boots with `fips=1`, Ubuntu's OpenSSL switches itself into
+FIPS mode. It makes `fips=yes` the default property and expects a `fips`
+provider, which non-Pro Ubuntu does not ship. Without one, every algorithm
+fetch fails. `ssl.create_default_context()` raises, so vLLM dies while
+importing `aiohttp`, before it can serve anything. This affects any image built
+on Ubuntu 24.04, including the upstream `vllm/vllm-openai` images. It does not
+show up on ordinary CI runners, because they do not boot in FIPS mode.
+
+**How this fork's images handle it:**
+
+- **Validated provider.** The images carry the OpenSSL 3.1.2 FIPS provider
+  ([CMVP certificate #4985](https://csrc.nist.gov/projects/cryptographic-module-validation-program/certificate/4985),
+  FIPS 140-3). It is built from `openssl-3.1.2.tar.gz`, pinned by SHA-256, with
+  the steps in section 11 of its Security Policy
+  (`./Configure enable-fips`, `make`, `make install_fips`). OpenSSL allows a
+  provider from a validated release to be used with any OpenSSL 3.0+ library,
+  here Ubuntu's 3.0.13.
+- **Per-machine installation.** The Security Policy requires `openssl
+  fipsinstall` to run on each machine, and its output must not be copied
+  between machines. On a FIPS host, `vllm-fips-entrypoint` runs
+  `fipsinstall -pedantic` at container start and writes
+  `/etc/ssl/vllm-fips.d/fips.cnf`, which the system `openssl.cnf` includes.
+  That config activates the `fips`, `base` and `default` providers with
+  `fips=yes` as the default property. Every process in the container picks it
+  up, including `docker exec` and exec probes. If the self-tests fail, the
+  container exits and prints why.
+- **Behaviour.** Approved algorithms are the default. TLS cannot negotiate
+  non-approved ciphers such as ChaCha20, and `hashlib.md5()` raises.
+  Explicitly non-security use (`usedforsecurity=False`) still reaches the
+  default provider, matching a RHEL host. On hosts not in FIPS mode the wrapper
+  changes nothing.
+- **Entrypoints.** `vllm-openai`, `vllm-openai-nonroot` and `vllm-sagemaker` all
+  start through `/usr/local/bin/vllm-fips-entrypoint`. If you replace the
+  entrypoint on a FIPS host, keep it as a prefix, for example
+  `command: ["vllm-fips-entrypoint", "vllm", "serve", ...]`. If
+  `/etc/ssl/vllm-fips.d` is not writable (read-only root filesystem, or a UID
+  outside group 0), the config is exported through `OPENSSL_CONF` for that
+  process tree only. In that case, prefix `docker exec` commands with
+  `vllm-fips-entrypoint` as well.
+- **Verification.** Ubuntu's OpenSSL treats `OPENSSL_FORCE_FIPS_MODE=1` exactly
+  like a `fips=1` kernel, so FIPS mode can be checked on any host:
+
+    ```bash
+    docker run --rm -e OPENSSL_FORCE_FIPS_MODE=1 -v "$PWD/tools:/t:ro" \
+        --entrypoint vllm-fips-entrypoint <image> \
+        python3 /t/check_fips_runtime.py
+    ```
+
+    The image build runs the same check, and fails if the image could not
+    start in FIPS mode.
+
+!!! warning "Validated module is not the same as a compliant deployment"
+    The Security Policy's tested operating environments do not include Ubuntu
+    24.04 or Linux on aarch64, and it lists no vendor-affirmed environments.
+    Running the module elsewhere relies on the CMVP's porting provisions, so
+    confirm that with your compliance team. Everything else in this section,
+    including host OS, key management and network crypto, still applies.
+
+!!! note
+    Build the images on a host that is not in FIPS mode. On a FIPS host, the
+    Ubuntu stages' `apt-get install` fails before any provider exists, because
+    `ca-certificates`' post-install script runs `openssl`.
+
+    The opt-in Wolfi variant does not include this provider. Its OpenSSL
+    (4.x) does not react to `fips=1`, so it runs on FIPS hosts, but it uses
+    non-FIPS cryptography.
 
 In short: the configuration knobs above let vLLM avoid non-approved algorithms, and the automatic fallbacks let it run without crashing on FIPS-enabled hosts. End-to-end FIPS compliance, however, is a property of the full deployment — host OS, crypto provider, transitive dependencies, and network architecture — not of vLLM alone.
 

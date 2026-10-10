@@ -261,6 +261,12 @@ repos:
     language: system
     pass_filenames: false
     files: ^docker/entrypoints/(vllm-nonroot-entrypoint|test_vllm_nonroot_entrypoint)\.sh$
+  - id: test-fips-entrypoint
+    name: Test FIPS entrypoint wrapper
+    entry: bash docker/entrypoints/test_vllm_fips_entrypoint.sh
+    language: system
+    pass_filenames: false
+    files: ^docker/entrypoints/(vllm-fips-entrypoint|test_vllm_fips_entrypoint)\.sh$
   - id: check-forbidden-imports
     name: Check for forbidden imports
     entry: python tools/pre_commit/check_forbidden_imports.py

@@ -118,3 +118,10 @@ PyPI wheels bundle an OpenSSL that aborts `import cv2` on FIPS-enabled hosts.
 Building the image therefore has a prerequisite step, described under
 [Build image from source](#build-image-from-source) above; the rationale is in
 [FIPS Compatibility](../usage/security.md#opencv-and-bundled-openssl).
+
+On a host booted with `fips=1`, the images activate their bundled OpenSSL FIPS
+provider at startup through `/usr/local/bin/vllm-fips-entrypoint`. If you
+override the entrypoint, keep that wrapper as the first element, for example
+`--entrypoint vllm-fips-entrypoint <image> vllm serve <model>`. Build the
+images on a host that is not in FIPS mode. See
+[OpenSSL FIPS provider in the container images](../usage/security.md#openssl-fips-provider-in-the-container-images).

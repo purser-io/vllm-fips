@@ -76,6 +76,12 @@
     "RUN_WHEEL_CHECK": {
       "default": "true"
     },
+    "OPENSSL_FIPS_VERSION": {
+      "default": "3.1.2"
+    },
+    "OPENSSL_FIPS_SHA256": {
+      "default": "a0ce69b8b97ea6a35b96875235aa453b966ba3cba8af2de23657d8b6767d6539"
+    },
     "FLASHINFER_VERSION": {
       "default": "0.7.0.post1"
     },

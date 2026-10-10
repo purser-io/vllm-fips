@@ -20,6 +20,11 @@
 
 # Image build and dependency pinning that the FIPS guarantee depends on
 /docker/Dockerfile                    @pallj011
+/docker/entrypoints/vllm-fips-entrypoint.sh       @pallj011
+/docker/entrypoints/test_vllm_fips_entrypoint.sh  @pallj011
+/tools/check_fips_runtime.py          @pallj011
+/tools/pre_commit/check_fips_hashlib.py  @pallj011
+/tests/tools/test_check_fips_hashlib.py  @pallj011
 /requirements/common.txt              @pallj011
 
 # Fork identity, security policy, and CI

@@ -797,6 +797,53 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     fi
 
 #################### DEV IMAGE ####################
+#################### OPENSSL FIPS PROVIDER ####################
+# The OpenSSL 3.1.2 FIPS provider: CMVP certificate #4985 (FIPS 140-3),
+# currently the only FIPS 140-3 validated OpenSSL provider. Built from the
+# validated source exactly as Security Policy section 11 prescribes
+# (`./Configure enable-fips`, `make`, `make install_fips`). OpenSSL permits a
+# provider from a validated release to be used with any OpenSSL 3.0+ library,
+# here Ubuntu's.
+#
+# Why: when the kernel boots with fips=1, Ubuntu's OpenSSL switches to FIPS
+# mode and expects a `fips` provider, which non-Pro Ubuntu does not ship.
+# Without one, every TLS context fails and vLLM dies importing aiohttp.
+# docker/entrypoints/vllm-fips-entrypoint.sh activates this provider at
+# container start, only on FIPS hosts.
+#
+# The build's fipsmodule.cnf is deleted: the Security Policy requires
+# `fipsinstall` to run on each machine, and its output must not be copied.
+FROM ${FINAL_BASE_IMAGE} AS openssl-fips-provider
+ARG OPENSSL_FIPS_VERSION=3.1.2
+# Matches openssl.org's and the GitHub release's published SHA-256.
+ARG OPENSSL_FIPS_SHA256=a0ce69b8b97ea6a35b96875235aa453b966ba3cba8af2de23657d8b6767d6539
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends \
+        build-essential perl curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+RUN curl -fsSLO "https://www.openssl.org/source/openssl-${OPENSSL_FIPS_VERSION}.tar.gz" \
+    && echo "${OPENSSL_FIPS_SHA256}  openssl-${OPENSSL_FIPS_VERSION}.tar.gz" \
+        | sha256sum -c - \
+    && tar xf "openssl-${OPENSSL_FIPS_VERSION}.tar.gz" \
+    && cd "openssl-${OPENSSL_FIPS_VERSION}" \
+    && ./Configure enable-fips --prefix=/opt/openssl-fips --libdir=lib \
+    && make -j"$(nproc)" \
+    && make install_sw install_fips \
+    && cd / && rm -rf /src \
+    && rm -rf /opt/openssl-fips/ssl /opt/openssl-fips/include \
+        /opt/openssl-fips/lib/pkgconfig /opt/openssl-fips/lib/engines-3 \
+        /opt/openssl-fips/lib/ossl-modules/legacy.so \
+        /opt/openssl-fips/lib/*.a /opt/openssl-fips/bin/c_rehash \
+    && actual="$(LD_LIBRARY_PATH=/opt/openssl-fips/lib \
+        /opt/openssl-fips/bin/openssl version -v)" \
+    && case "$actual" in \
+        "OpenSSL ${OPENSSL_FIPS_VERSION} "*) echo "built: $actual" ;; \
+        *) echo "FATAL: expected OpenSSL ${OPENSSL_FIPS_VERSION}, got $actual" >&2; \
+           exit 1 ;; \
+    esac
+#################### OPENSSL FIPS PROVIDER ####################
+
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
 FROM ${FINAL_BASE_IMAGE} AS vllm-runtime-base
@@ -955,6 +1002,23 @@ ENV CRIU_CUDA_PLUGIN_DIR=/usr/local/lib/criu
 RUN apt-get update -y \
     && apt-get install -y --only-upgrade openssl libssl3 \
     && rm -rf /var/lib/apt/lists/*
+
+# OpenSSL FIPS provider (see the openssl-fips-provider stage) and the wrapper
+# that installs it per machine at container start. The provider is linked
+# into Ubuntu's module directory so the `fips` name resolves to it. The system
+# openssl.cnf includes /etc/ssl/vllm-fips.d, which stays empty except on FIPS
+# hosts, where the wrapper writes the config there so every process in the
+# container picks it up. Group 0 can write it, for the non-root and
+# arbitrary-UID images.
+COPY --from=openssl-fips-provider /opt/openssl-fips /opt/openssl-fips
+COPY docker/entrypoints/vllm-fips-entrypoint.sh /usr/local/bin/vllm-fips-entrypoint
+RUN chmod 0755 /usr/local/bin/vllm-fips-entrypoint \
+    && modules="$(openssl version -m | sed -E 's/^MODULESDIR: "(.*)"$/\1/')" \
+    && test -d "$modules" \
+    && ln -s /opt/openssl-fips/lib/ossl-modules/fips.so "$modules/fips.so" \
+    && install -d -m 0775 -g 0 /etc/ssl/vllm-fips.d \
+    && printf '\n# FIPS hosts only; see vllm-fips-entrypoint.\n.include /etc/ssl/vllm-fips.d\n' \
+        >> /etc/ssl/openssl.cnf
 
 # Install uv for faster pip installs
 RUN python3 -m pip install uv
@@ -1207,6 +1271,20 @@ RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm
 # consistently from the host (see https://github.com/vllm-project/vllm/issues/18859).
 # Until then, add /usr/local/nvidia/lib64 before the image cuda path to allow override.
 ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}
+
+# FIPS-mode gate. OPENSSL_FORCE_FIPS_MODE=1 puts Ubuntu's OpenSSL on the same
+# code path as a fips=1 kernel, so this fails the build if the image could not
+# start on a FIPS host, or if TLS and hashlib would not be FIPS-restricted.
+# The second check runs without the wrapper, as `docker exec` would. A
+# non-FIPS start then has to clear the config: a machine-specific config must
+# never ship in the image.
+COPY tools/check_fips_runtime.py /tmp/check_fips_runtime.py
+RUN OPENSSL_FORCE_FIPS_MODE=1 \
+        vllm-fips-entrypoint python3 /tmp/check_fips_runtime.py \
+    && OPENSSL_FORCE_FIPS_MODE=1 python3 /tmp/check_fips_runtime.py --skip-vllm \
+    && vllm-fips-entrypoint true \
+    && test -z "$(ls -A /etc/ssl/vllm-fips.d)" \
+    && rm /tmp/check_fips_runtime.py
 
 # Copy examples and benchmarks at the end to minimize cache invalidation
 COPY examples examples
@@ -1480,7 +1558,7 @@ FROM vllm-openai-base AS vllm-sagemaker
 
 COPY examples/deployment/sagemaker-entrypoint.sh .
 RUN chmod +x sagemaker-entrypoint.sh
-ENTRYPOINT ["./sagemaker-entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/vllm-fips-entrypoint", "./sagemaker-entrypoint.sh"]
 
 FROM vllm-openai-base AS vllm-openai
 
@@ -1490,7 +1568,10 @@ FROM vllm-openai-base AS vllm-openai
 # user (UID 2000, GID 0) is already created in the `vllm-base` stage.
 # See docs/deployment/docker.md.
 # USER vllm
-ENTRYPOINT ["vllm", "serve"]
+#
+# vllm-fips-entrypoint only acts on FIPS hosts; see the openssl-fips-provider
+# stage. If you replace the entrypoint on such a host, keep it as a prefix.
+ENTRYPOINT ["/usr/local/bin/vllm-fips-entrypoint", "vllm", "serve"]
 #################### OPENAI API SERVER ####################
 
 #################### OPENAI API SERVER (NON-ROOT, OPT-IN) ####################
@@ -1511,7 +1592,8 @@ FROM vllm-openai AS vllm-openai-nonroot
 
 USER vllm
 WORKDIR /home/vllm
-ENTRYPOINT ["/usr/local/bin/vllm-nonroot-entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/vllm-fips-entrypoint", \
+            "/usr/local/bin/vllm-nonroot-entrypoint.sh"]
 #################### OPENAI API SERVER (NON-ROOT, OPT-IN) ####################
 
 #################### WOLFI FINAL IMAGE (OPT-IN) ####################

@@ -27,12 +27,15 @@ For events, please visit [vllm.ai/events](https://vllm.ai/events) to join us.
 > FIPS-enabled hosts. The published `opencv-python-headless` wheels bundle an
 > OpenSSL that aborts `import cv2` on FIPS-enabled hosts, so this fork builds
 > and pins its own wheel (installable on RHEL 8/9) and gates the images on it.
-> It also fixes vLLM hash calls that a FIPS-enforcing Python rejects, and
-> checks for new ones on every rebase. See
+> The images also carry the CMVP-validated OpenSSL 3.1.2 FIPS provider, without
+> which Ubuntu's OpenSSL cannot make a TLS connection on a FIPS host. The fork
+> also fixes vLLM hash calls that a FIPS-enforcing Python rejects, and checks
+> for new ones on every rebase. See
 > [FIPS Compatibility](docs/usage/security.md#fips-compatibility).
 >
 > **Where to report:** FIPS packaging and anything in
-> `docker/Dockerfile.opencv-fips`, `tools/check_opencv_fips.py`, or
+> `docker/Dockerfile.opencv-fips`, `docker/entrypoints/vllm-fips-entrypoint.sh`,
+> `tools/check_opencv_fips.py`, `tools/check_fips_runtime.py`, or
 > `custom-wheels/` → [issues on this fork](https://github.com/purser-io/vllm-fips/issues).
 > Everything else → [vllm-project/vllm](https://github.com/vllm-project/vllm/issues).
 > Vulnerabilities → see [SECURITY.md](SECURITY.md).

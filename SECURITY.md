@@ -9,7 +9,7 @@
 
 | Affected component | Report to |
 | --- | --- |
-| Fork-specific: `docker/Dockerfile.opencv-fips`, `tools/check_opencv_fips.py`, `custom-wheels/`, the FIPS wheel itself, or the resolver pinning in `docker/Dockerfile` | **Purser** — GitHub → Security → *Report a vulnerability* on [`purser-io/vllm-fips`](https://github.com/purser-io/vllm-fips/security/advisories/new), or email <security@purser-io.io> |
+| Fork-specific: `docker/Dockerfile.opencv-fips`, `tools/check_opencv_fips.py`, `custom-wheels/`, the FIPS wheel itself, the resolver pinning or the OpenSSL FIPS provider integration in `docker/Dockerfile`, `docker/entrypoints/vllm-fips-entrypoint.sh`, `tools/check_fips_runtime.py`, or `tools/pre_commit/check_fips_hashlib.py` | **Purser** — GitHub → Security → *Report a vulnerability* on [`purser-io/vllm-fips`](https://github.com/purser-io/vllm-fips/security/advisories/new), or email <security@purser-io.io> |
 | vLLM itself (the engine, API server, scheduler, model code — anything inherited from upstream) | **vLLM** — [upstream vulnerability submission form](https://github.com/vllm-project/vllm/security/advisories/new) |
 | `opencv-python` upstream, independent of this fork's packaging | [opencv/opencv-python](https://github.com/opencv/opencv-python/issues) |
 
