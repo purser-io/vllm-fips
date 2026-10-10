@@ -107,8 +107,10 @@ python tools/check_opencv_fips.py --require-ffmpeg \
 GitHub runners** (`ubuntu-24.04` for x86_64, `ubuntu-24.04-arm` for aarch64) --
 no QEMU, which would otherwise push an OpenCV + FFmpeg build into the
 multi-hour range. Each job asserts the wheel targets the expected architecture,
-re-runs the FIPS gate against the exported artifact in a clean interpreter, and
-records a SHA256.
+re-runs the FIPS gate against the exported artifact in a clean interpreter,
+installs it on AlmaLinux 9 with `OPENSSL_FORCE_FIPS_MODE=1` (after confirming
+that the stock PyPI wheel aborts there, so the emulation is known to be live),
+and records a SHA256.
 
 To populate this directory from a workflow run:
 

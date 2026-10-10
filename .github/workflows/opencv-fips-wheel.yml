@@ -129,6 +129,33 @@ jobs:
             python tools/check_opencv_fips.py --require-ffmpeg
           '
 
+      # Hosted runners cannot boot a FIPS kernel, but RHEL's OpenSSL honours
+      # OPENSSL_FORCE_FIPS_MODE, which reproduces a fips=1 host: verified
+      # against a real one, PyPI's cv2 aborts identically (exit 134) and
+      # hashlib refuses md5. The control run must abort, otherwise the
+      # emulation is inert and the positive result would mean nothing. Python
+      # is the distro's, on glibc 2.34, which also proves the RHEL 9 floor.
+      - name: Verify on emulated FIPS RHEL 9 (glibc 2.34)
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD:/w:ro" -e OPENSSL_FORCE_FIPS_MODE=1 \
+            almalinux:9@sha256:9819dc675b67b595c2b59e42be7763fca1a8bb217fa5944e04daa22e9a64db16 \
+            bash -euc '
+              dnf install -y -q python3.12 python3.12-pip >/dev/null
+              python3.12 -m venv /control
+              /control/bin/pip install -q --disable-pip-version-check \
+                opencv-python-headless==4.13.0.92
+              rc=0; /control/bin/python -c "import cv2" || rc=$?
+              if [ "$rc" -ne 134 ]; then
+                echo "::error::control did not abort (exit $rc); FIPS emulation is inert"
+                exit 1
+              fi
+              echo "control: PyPI cv2 aborted as expected (exit 134)"
+              python3.12 -m venv /fips
+              /fips/bin/pip install -q --disable-pip-version-check /w/wheelhouse/*.whl
+              /fips/bin/python /w/tools/check_opencv_fips.py --require-ffmpeg
+            '
+
       - name: Record checksum
         run: |
           set -euo pipefail
