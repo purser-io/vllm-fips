@@ -3,6 +3,7 @@
 """Tests for HF3FS KV Connector high-level components:
 - TestHf3fsMockClient      : file-backed mock client I/O correctness
 - TestHF3FSKVConnectorStats: metric collection, aggregation, serialisation
+- test_compute_prefix_hash : stable block keys that work on FIPS hosts
 """
 
 import os
@@ -13,6 +14,7 @@ import pytest
 import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_connector import (
+    HF3FSKVConnector,
     HF3FSKVConnectorStats,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.hf3fs_mock_client import (
@@ -231,3 +233,13 @@ class TestHF3FSKVConnectorStats:
         clone = hf3fs_stats.clone_and_reset()
         assert clone.data["num_transfer_task"] == 2
         assert hf3fs_stats.is_empty()
+
+
+def test_compute_prefix_hash():
+    """Keys stay md5-compatible with existing caches without tripping FIPS.
+
+    A FIPS-enforcing OpenSSL refuses md5 unless it is declared
+    non-security, so this raises there if `usedforsecurity=False` is lost.
+    """
+    key = HF3FSKVConnector._compute_prefix_hash(MagicMock(), [1, 2, 3], "abc")
+    assert key == "ec0b8d97705f8575db444f0dbba1068b"
