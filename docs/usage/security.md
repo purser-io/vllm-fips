@@ -425,6 +425,8 @@ Operators running vLLM on FIPS-enabled hosts should select FIPS-approved algorit
 
 vLLM uses MD5 in a few places to derive non-security cache keys (for example, configuration hashes). These call sites pass `usedforsecurity=False` and additionally fall back to SHA-256 when the underlying OpenSSL provider refuses MD5 outright (see `safe_hash()` in `vllm/utils/hashing.py`). No user action is required; this behavior is documented so that auditors and security reviewers can identify the MD5 references and understand their purpose.
 
+On FIPS builds of Python such as RHEL's, `hashlib.blake2b`/`blake2s` are refused like MD5, and passing parameters such as `digest_size=` raises `TypeError` even with `usedforsecurity=False`. HMAC cannot opt out, so HMAC-MD5 always fails. This fork checks every call site in `vllm/` against these rules with `tools/pre_commit/check_fips_hashlib.py`, which runs in pre-commit, as a full-tree CI step, and as a unit test.
+
 ### Dependencies that provide non-FIPS hash implementations
 
 Some dependencies expose hash implementations that are not FIPS-approved. vLLM only invokes them when the corresponding algorithm is selected, but operators with strict cryptographic controls may want to ensure the code paths are not exercised — and, where policy requires, that the packages themselves are absent:
@@ -511,15 +513,25 @@ PyPI wheel contains them.
   install, that FFmpeg and a usable stream-buffered backend are present, and
   that the installed distribution version matches the pin. It runs in both the
   `vllm-base` and `test` stages of `docker/Dockerfile`.
+- **Platform floor** — the wheel is built in the PyPA `manylinux_2_28` image, so
+  it installs on any glibc 2.28+ host, including RHEL 8 and RHEL 9, the most
+  common FIPS-validated platforms.
 
 !!! note
     This applies to the container images. If you install vLLM from PyPI into
     your own environment on a FIPS-enabled host, you will get the stock
-    `opencv-python-headless` wheel and the abort described above. Build the
-    wheel with the recipe referenced here and install it before (or over) the
-    stock one. Note that `requirements/test/*.txt` pin the stock version
-    explicitly, so a bare `uv pip install -r requirements/test/cuda.txt`
+    `opencv-python-headless` wheel and the abort described above. Install this
+    fork's wheel (a release asset, or built with the recipe referenced here)
+    over the stock one. Note that `requirements/test/*.txt` pin the stock
+    version explicitly, so a bare `uv pip install -r requirements/test/cuda.txt`
     outside the container images will reintroduce it.
+
+!!! note
+    The Ubuntu-based images link Python against Ubuntu's OpenSSL, which does
+    not load a FIPS provider even when the host kernel boots with `fips=1`.
+    Inside those images `hashlib` is therefore not FIPS-enforcing, and the
+    hash-algorithm settings above are the operator's control. Python from a
+    FIPS-validated distribution, as on a RHEL host, does enforce it.
 
 #### Attribution and where to report problems
 

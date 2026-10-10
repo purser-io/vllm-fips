@@ -23,11 +23,13 @@ For events, please visit [vllm.ai/events](https://vllm.ai/events) to join us.
 > **This is [`purser-io/vllm-fips`](https://github.com/purser-io/vllm-fips), a fork of [vllm-project/vllm](https://github.com/vllm-project/vllm) maintained by Purser.**
 >
 > vLLM is developed by the vLLM project and its 2000+ contributors; all credit
-> for the engine below belongs to them. This fork adds one thing: FIPS-safe
-> container images. The published `opencv-python-headless` wheels bundle an
+> for the engine below belongs to them. This fork makes vLLM run on
+> FIPS-enabled hosts. The published `opencv-python-headless` wheels bundle an
 > OpenSSL that aborts `import cv2` on FIPS-enabled hosts, so this fork builds
-> and pins its own wheel and gates the images on it. See
-> [FIPS Compatibility](docs/usage/security.md#opencv-and-bundled-openssl).
+> and pins its own wheel (installable on RHEL 8/9) and gates the images on it.
+> It also fixes vLLM hash calls that a FIPS-enforcing Python rejects, and
+> checks for new ones on every rebase. See
+> [FIPS Compatibility](docs/usage/security.md#fips-compatibility).
 >
 > **Where to report:** FIPS packaging and anything in
 > `docker/Dockerfile.opencv-fips`, `tools/check_opencv_fips.py`, or

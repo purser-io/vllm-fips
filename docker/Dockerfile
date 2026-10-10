@@ -1532,7 +1532,7 @@ ENTRYPOINT ["/usr/local/bin/vllm-nonroot-entrypoint.sh"]
 # upstream far more closely.
 #
 # Viable because both distros are glibc: Wolfi ships 2.43 against Ubuntu's
-# 2.35, so every manylinux wheel here -- including our manylinux_2_35 FIPS
+# 2.39, so every manylinux wheel here -- including our manylinux_2_28 FIPS
 # OpenCV build -- runs unchanged. This is why Wolfi works where Alpine (musl)
 # would not.
 #

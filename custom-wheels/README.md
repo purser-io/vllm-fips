@@ -84,9 +84,15 @@ deleting video support. `tools/check_opencv_fips.py --require-ffmpeg` guards
 against exactly that regression and runs in both the `vllm-base` and `test`
 stages.
 
-The wheel is built on the same Ubuntu release as `FINAL_BASE_IMAGE` and then
-`auditwheel repair`ed, so it is self-contained and does not depend on the
-runtime image shipping matching `libjpeg`/`libtiff` sonames.
+The wheel is built in the PyPA `manylinux_2_28` image (glibc 2.28) and then
+`auditwheel repair`ed, so it is self-contained, does not depend on the host
+shipping matching `libjpeg`/`libtiff` sonames, and installs on any glibc 2.28+
+system. That covers RHEL 8 and 9 (the usual FIPS hosts), the Ubuntu 24.04
+runtime image, and vLLM's own `manylinux_2_28` build stage. An earlier
+Ubuntu 22.04 build was tagged `manylinux_2_35` and could install on none of the
+RHEL releases. FFmpeg (7.1.5) and dav1d (1.5.4) are built from source pinned to
+exact commits; the other codecs come from AlmaLinux 8 packages, which receive
+backported security fixes.
 
 ### Verifying an existing wheel
 

@@ -38,9 +38,13 @@
 # exactly the capability `vllm/multimodal/video.py` requires -- an OpenCV built
 # without it fixes FIPS by deleting the feature vLLM needs.
 #
-# The wheel is built on the same Ubuntu release as the vLLM runtime image and
-# then auditwheel-repaired, so it is self-contained (no dependency on host
-# libjpeg/libtiff sonames) and carries a manylinux tag.
+# The wheel is built in the PyPA manylinux_2_28 image (glibc 2.28) and then
+# auditwheel-repaired, so it is self-contained (no dependency on host
+# libjpeg/libtiff sonames) and installs on any glibc >= 2.28 host. That floor
+# matters for FIPS specifically: RHEL 9 (glibc 2.34) is the most common
+# FIPS-validated platform, and vLLM's own build stage is manylinux_2_28 too.
+# An earlier Ubuntu 22.04 build produced a manylinux_2_35 wheel that neither
+# could install.
 #
 # BUILD
 #   docker buildx build -f docker/Dockerfile.opencv-fips --platform linux/amd64 \
@@ -59,8 +63,12 @@
 # build -- PyPI has no `+fips` release, so a resolver can never silently fall
 # back to the crashing upstream wheel.
 
-ARG UBUNTU_VERSION=22.04
-FROM ubuntu:${UBUNTU_VERSION} AS builder
+# PyPA manylinux_2_28 (AlmaLinux 8, glibc 2.28), pinned by digest per arch.
+# Each repository is single-arch, so the platform picks the stage below.
+FROM quay.io/pypa/manylinux_2_28_x86_64:2026.10.10-1@sha256:4131ddd7acb9c6c966af02fe7e71edc51e078c2d41f475966697676430bfa2ae AS manylinux-amd64
+FROM quay.io/pypa/manylinux_2_28_aarch64:2026.10.10-1@sha256:abd1230aa9e4058a74b89d27cd14ba18c0db036d7bfe6e6f219a29ea63c24eb6 AS manylinux-arm64
+
+FROM manylinux-${TARGETARCH} AS builder
 
 ARG PYTHON_VERSION=3.12
 # opencv-python tags are ONLY the trailing component, and they do not imply the
@@ -71,42 +79,70 @@ ARG PYTHON_VERSION=3.12
 # already pin 4.13.0.90/4.13.0.92, so this stays on the line the repo tests.
 # If you bump this, update EXPECT_VERSION below and every pin listed there.
 ARG OPENCV_PYTHON_REF=92
-ARG FFMPEG_VERSION=7.1.1
-# Commit that tag n7.1.1 points at. Verified and asserted during the build so a
+ARG FFMPEG_VERSION=7.1.5
+# Commit that tag n7.1.5 points at. Verified and asserted during the build so a
 # moved tag fails loudly instead of silently changing the sources.
-ARG FFMPEG_COMMIT=db69d06eeeab4f46da15030a80d539efb4503ca8
+ARG FFMPEG_COMMIT=3a0867c2bfda4a4d4309ca1a8cbdc6175e67f587
+ARG DAV1D_VERSION=1.5.4
+# Commit that tag 1.5.4 points at (identical on code.videolan.org and the
+# GitHub mirror). Asserted the same way as FFMPEG_COMMIT.
+ARG DAV1D_COMMIT=54706fc6bc0cdecab7e9593974a4039cc038fca7
 ARG LOCAL_VERSION_SUFFIX=fips
 # Asserted after the build so a tag/version mismatch fails here rather than
 # surfacing later as an unsatisfiable pin in the vLLM image build. Must match
 # requirements/common.txt and the UV_OVERRIDE entries in docker/Dockerfile.
 ARG EXPECT_VERSION=4.13.0.92+fips
 
-ENV DEBIAN_FRONTEND=noninteractive
+# Toolchain and image codecs. `dnf upgrade` first: auditwheel vendors these
+# libraries into the wheel, so the builder's security updates are what ship.
+# Deliberately absent: openssl-devel, gnutls-devel, mbedtls-devel. With no TLS
+# headers present, FFmpeg's configure cannot silently re-enable a TLS backend;
+# the check below makes that an assertion rather than an assumption.
+RUN dnf -y upgrade \
+    && dnf -y install dnf-plugins-core \
+    && dnf config-manager --set-enabled powertools \
+    && dnf -y install --setopt=install_weak_deps=False \
+        git nasm pkgconf-pkg-config \
+        zlib-devel libjpeg-turbo-devel libpng-devel libtiff-devel \
+        libwebp-devel openjpeg2-devel \
+    && dnf clean all \
+    && for pkg in openssl-devel gnutls-devel mbedtls-devel; do \
+        if rpm -q "$pkg" >/dev/null; then \
+            echo "FATAL: $pkg is installed; FFmpeg could link a TLS backend" >&2; \
+            exit 1; \
+        fi; \
+    done
 
-# Toolchain, image codecs, and the FFmpeg codec deps we intend to keep.
-# Deliberately absent: libssl-dev, libgnutls28-dev, libmbedtls-dev. If none of
-# them are present, FFmpeg's configure cannot silently re-enable a TLS backend.
-RUN apt-get update -y \
-    && apt-get install -y --no-install-recommends \
-        software-properties-common ca-certificates curl git \
-        gnupg gpg-agent dirmngr \
-        build-essential cmake ninja-build pkg-config nasm yasm \
-        zlib1g-dev libjpeg-turbo8-dev libpng-dev libtiff-dev \
-        libwebp-dev libopenjp2-7-dev \
-        libdav1d-dev \
-    && add-apt-repository -y ppa:deadsnakes/ppa \
-    && apt-get update -y \
-    && apt-get install -y --no-install-recommends \
-        python${PYTHON_VERSION} python${PYTHON_VERSION}-dev \
-        python${PYTHON_VERSION}-venv \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN python${PYTHON_VERSION} -m venv /opt/bldenv
+RUN pyv="$(echo "${PYTHON_VERSION}" | tr -d .)" \
+    && "/opt/python/cp${pyv}-cp${pyv}/bin/python" -m venv /opt/bldenv
 ENV PATH="/opt/bldenv/bin:$PATH"
-# patchelf comes from PyPI, not apt: Ubuntu 22.04 ships 0.14.3 and
-# `auditwheel repair` requires >= 0.14.5.
+# auditwheel and patchelf come with the manylinux image; meson and ninja are
+# for dav1d.
 RUN pip install --no-cache-dir --upgrade \
-        pip setuptools wheel scikit-build auditwheel numpy patchelf
+        pip setuptools wheel scikit-build numpy meson ninja
+
+# ---------------------------------------------------------------------------
+# dav1d (BSD-2), FFmpeg's software AV1 decoder. FFmpeg's built-in `av1`
+# decoder only works with hardware acceleration, so without dav1d there is no
+# AV1 decode at all. Built from source because the only EL8 package is EPEL's
+# dav1d 0.5.2 from 2019, which no distro security process tracks.
+# ---------------------------------------------------------------------------
+WORKDIR /src
+RUN git clone --depth 1 --branch "${DAV1D_VERSION}" \
+        https://code.videolan.org/videolan/dav1d.git dav1d \
+    && cd dav1d \
+    && actual="$(git rev-parse HEAD)" \
+    && if [ "$actual" != "${DAV1D_COMMIT}" ]; then \
+        echo "FATAL: dav1d ${DAV1D_VERSION} resolved to $actual," >&2; \
+        echo "expected ${DAV1D_COMMIT}. Tag moved or repo compromised." >&2; \
+        exit 1; \
+    fi \
+    && meson setup build --prefix=/opt/dav1d --libdir=lib \
+        --buildtype=release -Denable_tools=false -Denable_tests=false \
+    && ninja -C build install \
+    && cd / && rm -rf /src/dav1d
+
+ENV PKG_CONFIG_PATH=/opt/dav1d/lib/pkgconfig
 
 # ---------------------------------------------------------------------------
 # FFmpeg, built WITHOUT any TLS backend.
@@ -123,8 +159,7 @@ RUN pip install --no-cache-dir --upgrade \
 # libvpx is likewise an encoder -- FFmpeg's native VP8/VP9 decoders cover the
 # decode path. So this stays LGPL with no loss of function.
 #
-# libdav1d (BSD-2) is kept because FFmpeg's native AV1 decoder is markedly
-# slower.
+# libdav1d is enabled for software AV1 decode (see the dav1d stage above).
 # ---------------------------------------------------------------------------
 WORKDIR /src
 # Sourced from the GitHub mirror by tag, then pinned to an exact commit, rather
@@ -162,7 +197,7 @@ RUN if find /opt/ffmpeg -name '*.so*' -exec sh -c \
     fi
 
 ENV PKG_CONFIG_PATH=/opt/ffmpeg/lib/pkgconfig
-ENV LD_LIBRARY_PATH=/opt/ffmpeg/lib
+ENV LD_LIBRARY_PATH=/opt/ffmpeg/lib:/opt/dav1d/lib
 
 # ---------------------------------------------------------------------------
 # OpenCV (headless) against that FFmpeg.
@@ -189,11 +224,13 @@ ENV CMAKE_ARGS="\
 -DBUILD_opencv_apps=OFF"
 RUN pip wheel . --no-deps --wheel-dir /wheels-raw -v
 
-# auditwheel bundles the image codecs and FFmpeg into the wheel, so the result
-# does not depend on the runtime image happening to ship matching sonames. This
-# is what the current hand-built wheel skipped -- it needed libjpeg.so.62 and
-# libtiff.so.6, neither of which exists on nvidia/cuda:*-ubuntu22.04.
-RUN auditwheel repair /wheels-raw/*.whl -w /wheels-repaired
+# auditwheel bundles the image codecs, FFmpeg and dav1d into the wheel, so the
+# result does not depend on the host happening to ship matching sonames. An
+# early hand-built wheel skipped this and needed libjpeg.so.62 and libtiff.so.6,
+# neither of which exists on nvidia/cuda:*-ubuntu22.04. `--plat` makes a wheel
+# that cannot meet the manylinux_2_28 floor a build failure.
+RUN auditwheel repair --plat "manylinux_2_28_$(uname -m)" \
+        /wheels-raw/*.whl -w /wheels-repaired
 
 # ---------------------------------------------------------------------------
 # Verification gate + local-version stamp.

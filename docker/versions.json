@@ -22,6 +22,12 @@
     "FINAL_BASE_IMAGE": {
       "default": "nvidia/cuda:13.0.3-base-ubuntu24.04"
     },
+    "WOLFI_IMAGE": {
+      "default": "cgr.dev/chainguard/wolfi-base:latest"
+    },
+    "VLLM_RUNTIME_SRC": {
+      "default": "vllm-base"
+    },
     "GET_PIP_URL": {
       "default": "https://bootstrap.pypa.io/get-pip.py"
     },
