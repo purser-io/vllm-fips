@@ -952,14 +952,8 @@ ENV CRIU_CUDA_PLUGIN_DIR=/usr/local/lib/criu
 # also pull CUDA/NVIDIA packages from NVIDIA's repo, changing the toolkit
 # out from under a pinned CUDA_VERSION. Widen this list when the gate flags
 # something else -- that is the gate's job, and it runs on every image build.
-#
-# The libssl package is libssl3 on Ubuntu 22.04 but libssl3t64 on 24.04, and
-# `--only-upgrade` silently skips a name that is not installed, so upgrade
-# whichever one is actually present.
 RUN apt-get update -y \
-    && apt-get install -y --only-upgrade openssl \
-        $(dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' 'libssl3*' \
-            | awk '$1 == "ii" {print $2}') \
+    && apt-get install -y --only-upgrade openssl libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv for faster pip installs
