@@ -105,6 +105,11 @@ def main() -> None:
     if not args.skip_vllm:
         check_vllm_imports()
     print("PASS OpenSSL is FIPS-mode capable")
+    check_tls()
+    check_hashlib()
+    if not args.skip_vllm:
+        check_vllm_imports()
+    print("PASS OpenSSL is FIPS-mode capable")
 
 
 if __name__ == "__main__":
