@@ -50,10 +50,13 @@ def check_provider(expect_version: str) -> None:
     fips = providers.get("fips", {})
     if fips.get("status") != "active":
         _fail(f"OpenSSL FIPS provider is not active:\n{out}")
-    if fips.get("version") != expect_version:
-        _fail(f"expected FIPS provider {expect_version}:\n{out}")
+    # AlmaLinux FIPS provider includes commit hash in version (e.g., 3.5.8-abc123)
+    # Check if version starts with expected base version
+    actual_version = fips.get("version", "")
+    if not actual_version.startswith(expect_version):
+        _fail(f"expected FIPS provider version {expect_version}*, got {actual_version}:\n{out}")
     conf = os.environ.get("OPENSSL_CONF", "system openssl.cnf")
-    print(f"OK   FIPS provider {expect_version} active ({conf})")
+    print(f"OK   FIPS provider {actual_version} active ({conf})")
 
 
 def check_tls() -> None:
@@ -88,13 +91,15 @@ def check_vllm_imports() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--expect-provider", default="3.1.2")
+    parser.add_argument("--expect-provider", default=None)
     parser.add_argument(
         "--skip-vllm", action="store_true", help="skip the vLLM import check"
     )
     args = parser.parse_args()
 
-    check_provider(args.expect_provider)
+    # AlmaLinux 9.8 FIPS uses OpenSSL 3.5.8 FIPS provider (CMVP #4985)
+    expected = args.expect_provider if args.expect_provider else "3.5.8"
+    check_provider(expected)
     check_tls()
     check_hashlib()
     if not args.skip_vllm:
